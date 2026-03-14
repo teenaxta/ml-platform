@@ -362,11 +362,19 @@ services:
     ports:
       - "5000:5000"
     environment:
+      # ── Database / artifacts ─────────────────────────────────────
       MLFLOW_DB_PASSWORD: ${MLFLOW_DB_PASSWORD}
       MLFLOW_DEFAULT_ARTIFACT_ROOT: s3://mlflow-artifacts/
       AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
       MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+      # ── Auth (basic-auth app) ────────────────────────────────────
+      # Required for CSRF protection — must be consistent across nodes
+      MLFLOW_FLASK_SERVER_SECRET_KEY: ${MLFLOW_FLASK_SECRET_KEY}
+      MLFLOW_ADMIN_USERNAME: ${MLFLOW_ADMIN_USERNAME:-admin}
+      MLFLOW_ADMIN_PASSWORD: ${MLFLOW_ADMIN_PASSWORD}
+      # ── Workspaces ───────────────────────────────────────────────
+      MLFLOW_ENABLE_WORKSPACES: "true"
     restart: unless-stopped
 
   # ────────────────────────────────────────────────────────────

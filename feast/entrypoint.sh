@@ -9,5 +9,8 @@ PGPASSWORD="${FEAST_DB_PASSWORD}" psql -h postgres-feast -U feast -d feast \
 echo "[Feast] Applying feature definitions..."
 feast apply
 
+echo "[Feast] Starting Web UI on :6567 ..."
+feast ui --host 0.0.0.0 --port 6567 &
+
 echo "[Feast] Starting feature server on :6566 ..."
 exec feast serve --host 0.0.0.0 --port 6566
