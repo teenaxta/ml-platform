@@ -1,0 +1,425 @@
+# ============================================================
+#  Open-Source ML Platform Stack
+#  Services: MinIO · Iceberg REST · Spark · JupyterHub
+#            dbt · Airflow · Feast · MLflow · MLServer · CloudBeaver
+#
+#  First-time setup:
+#    cp .env.example .env        # edit passwords
+#    docker compose build        # build custom images
+#    docker compose up -d        # start everything
+# ============================================================
+
+x-airflow-common: &airflow-common
+  image: apache/airflow:2.9.3
+  platform: linux/amd64
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${AIRFLOW_DB_PASSWORD}@postgres-airflow:5432/airflow
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY}
+    AIRFLOW__WEBSERVER__RBAC: "true"
+    AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth
+    MINIO_ENDPOINT: http://minio:9000
+    MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+    MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+    ICEBERG_REST_URL: http://iceberg-rest:8181
+    SPARK_MASTER_URL: spark://spark-master:7077
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/logs:/opt/airflow/logs
+    - ./airflow/plugins:/opt/airflow/plugins
+    - ./dbt:/opt/dbt
+  depends_on:
+    postgres-airflow:
+      condition: service_healthy
+  restart: unless-stopped
+
+services:
+
+  # ────────────────────────────────────────────────────────────
+  #  1. MinIO  —  S3-compatible object storage
+  #     Console: http://localhost:9001
+  #     API:     http://localhost:9000
+  # ────────────────────────────────────────────────────────────
+  minio:
+    image: minio/minio:RELEASE.2024-05-10T01-41-38Z
+    platform: linux/amd64
+    container_name: minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    # No healthcheck: minio server image does not include 'mc' or curl
+    restart: unless-stopped
+
+  minio-init:
+    image: minio/mc:RELEASE.2024-05-09T17-04-24Z
+    platform: linux/amd64
+    container_name: minio-init
+    depends_on:
+      minio:
+        condition: service_started
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    entrypoint: >
+      /bin/sh -c "
+        echo 'Waiting for MinIO...';
+        until mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD 2>/dev/null; do sleep 2; done;
+        mc mb --ignore-existing local/warehouse;
+        mc mb --ignore-existing local/mlserver-models;
+        mc mb --ignore-existing local/feast-offline;
+        mc mb --ignore-existing local/feast-registry;
+        mc mb --ignore-existing local/mlflow-artifacts;
+        echo 'Buckets ready.';
+      "
+    restart: on-failure
+
+  # ────────────────────────────────────────────────────────────
+  #  2. Iceberg REST Catalog
+  #     API: http://localhost:8181
+  # ────────────────────────────────────────────────────────────
+  iceberg-rest:
+    image: tabulario/iceberg-rest:0.10.0
+    platform: linux/amd64
+    container_name: iceberg-rest
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    ports:
+      - "8181:8181"
+    environment:
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      AWS_REGION: us-east-1
+      CATALOG_WAREHOUSE: s3://warehouse/
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: http://minio:9000
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
+    restart: unless-stopped
+
+  # ────────────────────────────────────────────────────────────
+  #  3. Apache Spark  —  distributed compute
+  #     Master UI: http://localhost:8080
+  #     Worker UI: http://localhost:8081
+  # ────────────────────────────────────────────────────────────
+  spark-master:
+    image: bitnamilegacy/spark:3.5.1
+    platform: linux/amd64
+    container_name: spark-master
+    environment:
+      SPARK_MODE: master
+      SPARK_MASTER_HOST: spark-master
+      SPARK_RPC_AUTHENTICATION_ENABLED: "no"
+      SPARK_RPC_ENCRYPTION_ENABLED: "no"
+      SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED: "no"
+      SPARK_SSL_ENABLED: "no"
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+    volumes:
+      - ./spark/conf/spark-defaults.conf:/opt/bitnami/spark/conf/spark-defaults.conf:ro
+    restart: unless-stopped
+
+  spark-worker:
+    image: bitnamilegacy/spark:3.5.1
+    platform: linux/amd64
+    container_name: spark-worker-1
+    depends_on:
+      - spark-master
+    environment:
+      SPARK_MODE: worker
+      SPARK_MASTER_URL: spark://spark-master:7077
+      SPARK_WORKER_MEMORY: ${SPARK_WORKER_MEMORY:-8G}
+      SPARK_WORKER_CORES: ${SPARK_WORKER_CORES:-4}
+      SPARK_RPC_AUTHENTICATION_ENABLED: "no"
+      SPARK_RPC_ENCRYPTION_ENABLED: "no"
+      SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED: "no"
+      SPARK_SSL_ENABLED: "no"
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./spark/conf/spark-defaults.conf:/opt/bitnami/spark/conf/spark-defaults.conf:ro
+    restart: unless-stopped
+
+  # ────────────────────────────────────────────────────────────
+  #  4. JupyterHub  —  multi-user notebook server
+  #     UI:    http://localhost:8888
+  #     Admin: http://localhost:8888/hub/admin
+  # ────────────────────────────────────────────────────────────
+  jupyterhub:
+    build:
+      context: ./jupyterhub
+      dockerfile: Dockerfile
+    container_name: jupyterhub
+    depends_on:
+      - spark-master
+      - iceberg-rest
+      - postgres-jupyterhub
+    ports:
+      - "8888:8000"
+    environment:
+      JUPYTERHUB_ADMIN_USER: ${JUPYTERHUB_ADMIN_USER}
+      JUPYTERHUB_ADMIN_PASSWORD: ${JUPYTERHUB_ADMIN_PASSWORD}
+      JUPYTERHUB_DB_URL: postgresql+psycopg2://jupyterhub:${JUPYTERHUB_DB_PASSWORD}@postgres-jupyterhub:5432/jupyterhub
+      SPARK_MASTER: spark://spark-master:7077
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      AWS_S3_ENDPOINT: http://minio:9000
+    volumes:
+      - ./jupyterhub/jupyterhub_config.py:/srv/jupyterhub/jupyterhub_config.py:ro
+      - ./notebooks:/srv/jupyterhub/notebooks
+      - jupyterhub_data:/srv/jupyterhub/data
+      - ./spark/conf/spark-defaults.conf:/usr/local/spark/conf/spark-defaults.conf:ro
+    restart: unless-stopped
+
+  postgres-jupyterhub:
+    image: postgres:15
+    platform: linux/amd64
+    container_name: postgres-jupyterhub
+    environment:
+      POSTGRES_USER: jupyterhub
+      POSTGRES_PASSWORD: ${JUPYTERHUB_DB_PASSWORD}
+      POSTGRES_DB: jupyterhub
+    volumes:
+      - postgres_jupyterhub_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "jupyterhub"]
+      interval: 10s
+      retries: 5
+    restart: unless-stopped
+
+  # ────────────────────────────────────────────────────────────
+  #  5. dbt Core  —  SQL transformation
+  #     Run:  docker compose exec dbt dbt run --project-dir retail
+  #     Docs: http://localhost:8090  (after dbt docs serve)
+  # ────────────────────────────────────────────────────────────
+  dbt:
+    image: ghcr.io/dbt-labs/dbt-spark:1.8.0
+    platform: linux/amd64
+    container_name: dbt
+    depends_on:
+      - spark-master
+    entrypoint: ["tail", "-f", "/dev/null"]
+    working_dir: /opt/dbt
+    environment:
+      DBT_PROFILES_DIR: /opt/dbt
+    volumes:
+      - ./dbt:/opt/dbt
+    ports:
+      - "8090:8080"
+    restart: unless-stopped
+
+  # ────────────────────────────────────────────────────────────
+  #  6. Airflow  —  pipeline orchestration
+  #     UI: http://localhost:8082
+  # ────────────────────────────────────────────────────────────
+  postgres-airflow:
+    image: postgres:15
+    platform: linux/amd64
+    container_name: postgres-airflow
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: ${AIRFLOW_DB_PASSWORD}
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres_airflow_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+    restart: unless-stopped
+
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow-init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate
+        airflow users create \
+          --username admin \
+          --password ${AIRFLOW_ADMIN_PASSWORD} \
+          --firstname Admin \
+          --lastname User \
+          --role Admin \
+          --email admin@example.com
+    restart: on-failure
+
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: airflow-webserver
+    command: webserver
+    ports:
+      - "8082:8080"
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow-scheduler
+    command: scheduler
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # ────────────────────────────────────────────────────────────
+  #  7. Feast  —  feature store
+  #     API:    http://localhost:6566
+  #     UI:     http://localhost:6567
+  #
+  #  A ready-to-run Feast project is pre-configured in ./feast/project/
+  #  On first start it runs `feast apply` automatically.
+  # ────────────────────────────────────────────────────────────
+  feast:
+    build:
+      context: ./feast
+      dockerfile: Dockerfile
+    container_name: feast
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+      postgres-feast:
+        condition: service_healthy
+    ports:
+      - "6566:6566"
+      - "6567:6567"
+    environment:
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      AWS_S3_ENDPOINT_URL: http://minio:9000
+      FEAST_DB_PASSWORD: ${FEAST_DB_PASSWORD}
+      FEAST_REGISTRY_DB_URL: postgresql://feast:${FEAST_DB_PASSWORD}@postgres-feast:5432/feast
+    volumes:
+      - ./feast/project:/opt/feast/project
+    restart: unless-stopped
+
+  postgres-feast:
+    image: pgvector/pgvector:pg15
+    platform: linux/amd64
+    container_name: postgres-feast
+    environment:
+      POSTGRES_USER: feast
+      POSTGRES_PASSWORD: ${FEAST_DB_PASSWORD}
+      POSTGRES_DB: feast
+    volumes:
+      - postgres_feast_data:/var/lib/postgresql/data
+      - ./feast/init-pgvector.sql:/docker-entrypoint-initdb.d/init-pgvector.sql:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "feast"]
+      interval: 10s
+      retries: 5
+    restart: unless-stopped
+
+  # ────────────────────────────────────────────────────────────
+  #  8. MLflow  —  experiment tracking & model registry
+  #     UI: http://localhost:5000
+  #
+  #  Backend: Postgres (runs, params, metrics). Artifacts: MinIO (s3://mlflow-artifacts).
+  # ────────────────────────────────────────────────────────────
+  postgres-mlflow:
+    image: postgres:15
+    platform: linux/amd64
+    container_name: postgres-mlflow
+    environment:
+      POSTGRES_USER: mlflow
+      POSTGRES_PASSWORD: ${MLFLOW_DB_PASSWORD}
+      POSTGRES_DB: mlflow
+    volumes:
+      - postgres_mlflow_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "mlflow"]
+      interval: 10s
+      retries: 5
+    restart: unless-stopped
+
+  mlflow:
+    build:
+      context: ./mlflow
+      dockerfile: Dockerfile
+    container_name: mlflow
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+      postgres-mlflow:
+        condition: service_healthy
+    ports:
+      - "5000:5000"
+    environment:
+      MLFLOW_DB_PASSWORD: ${MLFLOW_DB_PASSWORD}
+      MLFLOW_DEFAULT_ARTIFACT_ROOT: s3://mlflow-artifacts/
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+    restart: unless-stopped
+
+  # ────────────────────────────────────────────────────────────
+  #  9. MLServer  —  model serving (REST + gRPC)
+  #     REST: http://localhost:8085/v2
+  #     Docs: http://localhost:8085/v2/docs
+  #     gRPC: localhost:8086
+  #
+  #  Drop model folders into ./mlserver/models/ and restart.
+  # ────────────────────────────────────────────────────────────
+  mlserver:
+    image: seldonio/mlserver:1.6.0
+    platform: linux/amd64
+    container_name: mlserver
+    ports:
+      - "8085:8080"
+      - "8086:8081"
+    environment:
+      MLSERVER_MODELS_DIR: /opt/mlserver/models
+      MLSERVER_HTTP_PORT: "8080"
+      MLSERVER_GRPC_PORT: "8081"
+      MLSERVER_PARALLEL_WORKERS: "1"
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - ./mlserver/models:/opt/mlserver/models
+      - ./mlserver/settings.json:/opt/mlserver/settings.json:ro
+    restart: unless-stopped
+
+  # ────────────────────────────────────────────────────────────
+  #  10. CloudBeaver  —  web SQL client (query your Postgres DBs)
+  #     UI: http://localhost:8978
+  # ────────────────────────────────────────────────────────────
+  cloudbeaver:
+    image: dbeaver/cloudbeaver:24.1.0
+    platform: linux/amd64
+    container_name: cloudbeaver
+    ports:
+      - "8978:8978"
+    volumes:
+      - cloudbeaver_data:/opt/cloudbeaver/workspace
+    restart: unless-stopped
+
+volumes:
+  minio_data:
+  postgres_airflow_data:
+  postgres_feast_data:
+  postgres_mlflow_data:
+  postgres_jupyterhub_data:
+  jupyterhub_data:
+  cloudbeaver_data:
+
+networks:
+  default:
+    name: mlplatform
+    driver: bridge

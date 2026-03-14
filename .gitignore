@@ -1,0 +1,66 @@
+# Environment and secrets
+.env
+.env.local
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# IDE and OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Airflow
+airflow/logs/
+airflow/*.db
+airflow/*.sqlite
+airflow/airflow-webserver.pid
+
+# MLflow
+mlflow/artifacts/
+mlflow/mlruns/
+
+# Docker
+.docker/
+
+# Spark / local data
+spark/work/
+*.log
+
+# Misc
+*.log
+.pytest_cache/
+.coverage
+htmlcov/

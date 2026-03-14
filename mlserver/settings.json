@@ -1,0 +1,6 @@
+{
+    "debug": false,
+    "parallel_workers": 1,
+    "http_port": 8080,
+    "grpc_port": 8081
+}

@@ -1,0 +1,27 @@
+project: retail_features
+provider: local
+
+# Registry stored in Postgres (survives container restarts)
+registry:
+  registry_type: sql
+  path: postgresql://feast:${FEAST_DB_PASSWORD}@postgres-feast:5432/feast
+  cache_ttl_seconds: 60
+
+# Offline store: reads Parquet files from MinIO via S3
+# These are the files written by Spark / dbt
+offline_store:
+  type: file
+
+# Online store: Postgres with pgvector for low-latency lookups + vector search
+online_store:
+  type: postgres
+  host: postgres-feast
+  port: 5432
+  database: feast
+  user: feast
+  password: ${FEAST_DB_PASSWORD}
+  pgvector_enabled: true
+  vector_len: 512
+
+# Entity key serialization
+entity_key_serialization_version: 2
