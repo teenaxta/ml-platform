@@ -26,10 +26,14 @@ Usage in notebooks:
     ).to_df()
 """
 
+import os
 from datetime import timedelta
 from feast import Entity, FeatureView, Field, FileSource, ValueType
 from feast.data_format import ParquetFormat
 from feast.types import Float64, Int64, Bool, String
+
+
+S3_ENDPOINT = os.getenv("AWS_S3_ENDPOINT_URL", "http://minio:9000")
 
 
 # ── Entities ─────────────────────────────────────────────────
@@ -57,25 +61,28 @@ product = Entity(
 
 customer_stats_source = FileSource(
     name="customer_stats_source",
-    path="s3://warehouse/retail/customer_features/",
+    path="s3://warehouse/feast/customer_stats/",
     file_format=ParquetFormat(),
     timestamp_field="event_timestamp",
+    s3_endpoint_override=S3_ENDPOINT,
     description="Aggregated customer purchase statistics from dbt model",
 )
 
 customer_behavior_source = FileSource(
     name="customer_behavior_source",
-    path="s3://warehouse/retail/customer_behavior/",
+    path="s3://warehouse/feast/customer_behavior/",
     file_format=ParquetFormat(),
     timestamp_field="event_timestamp",
+    s3_endpoint_override=S3_ENDPOINT,
     description="Customer behavioural signals from the events table",
 )
 
 product_stats_source = FileSource(
     name="product_stats_source",
-    path="s3://warehouse/retail/product_features/",
+    path="s3://warehouse/feast/product_stats/",
     file_format=ParquetFormat(),
     timestamp_field="event_timestamp",
+    s3_endpoint_override=S3_ENDPOINT,
     description="Product-level aggregated statistics",
 )
 

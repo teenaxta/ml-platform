@@ -1,0 +1,57 @@
+# Access And URLs
+
+## Platform UIs
+
+| Service | URL | Username | Password / Note |
+|---|---|---|---|
+| JupyterHub | http://localhost:8888 | `admin` | value of `JUPYTERHUB_ADMIN_PASSWORD` |
+| Airflow | http://localhost:8082 | `admin` | value of `AIRFLOW_ADMIN_PASSWORD` |
+| Superset | http://localhost:8088 | value of `SUPERSET_ADMIN_USERNAME` | value of `SUPERSET_ADMIN_PASSWORD` |
+| MLflow | http://localhost:5000 | value of `MLFLOW_ADMIN_USERNAME` | value of `MLFLOW_ADMIN_PASSWORD` |
+| Feast UI | http://localhost:6567 | none | no auth in local demo |
+| MLServer REST | http://localhost:8085/v2 | none | no auth in local demo |
+| Great Expectations Data Docs | http://localhost:8091 | none | static docs |
+| Evidently Report | http://localhost:8092 | none | static report |
+| Grafana | http://localhost:3000 | value of `GRAFANA_ADMIN_USER` | value of `GRAFANA_ADMIN_PASSWORD` |
+| Prometheus | http://localhost:9090 | none | no auth in local demo |
+| MinIO Console | http://localhost:9001 | value of `MINIO_ROOT_USER` | value of `MINIO_ROOT_PASSWORD` |
+| Spark Master UI | http://localhost:8080 | none | no auth |
+| Spark Worker UI | http://localhost:8081 | none | no auth |
+| CloudBeaver | http://localhost:8978 | created on first visit | you set it on first use |
+| Trino | http://localhost:8093 | none | use SQL clients or CLI; this is the coordinator endpoint |
+
+## Common local connection details
+
+### Demo PostgreSQL
+
+- host from your machine: `localhost`
+- port: `5433`
+- database: `retail_db`
+- username: `analyst`
+- password: `analyst123`
+- host from CloudBeaver or any other container on the compose network: `demo-postgres`
+- port from CloudBeaver or any other container on the compose network: `5432`
+
+### Trino from SQL clients
+
+- host from your machine: `localhost`
+- port: `8093`
+- user: `trino`
+- catalog: `iceberg` or `postgresql`
+- schema examples: `analytics`, `retail_raw`, `public`
+
+### MinIO / S3
+
+- endpoint: `http://localhost:9000`
+- access key: value of `MINIO_ROOT_USER`
+- secret key: value of `MINIO_ROOT_PASSWORD`
+
+## Generated learner artifacts
+
+These become useful after `platform-bootstrap` completes:
+
+- dbt docs: `dbt/retail/target/index.html`
+- Great Expectations docs: `great_expectations/uncommitted/data_docs/local_site/index.html`
+- Evidently report: `evidently/reports/index.html`
+- MLServer model bundle: `mlserver/models/churn-model/`
+- Feast preview file: `feast/project/feature_preview.csv`

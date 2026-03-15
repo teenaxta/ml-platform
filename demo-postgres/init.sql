@@ -46,6 +46,34 @@ CREATE TABLE events (
     metadata     JSONB
 );
 
+CREATE TABLE payments (
+    payment_id      SERIAL PRIMARY KEY,
+    order_id        INT REFERENCES orders(order_id),
+    payment_method  VARCHAR(30),
+    payment_status  VARCHAR(20) CHECK (payment_status IN ('captured','failed','refunded')),
+    amount          NUMERIC(10,2),
+    paid_at         TIMESTAMP
+);
+
+CREATE TABLE shipments (
+    shipment_id      SERIAL PRIMARY KEY,
+    order_id         INT REFERENCES orders(order_id),
+    carrier          VARCHAR(40),
+    shipment_status  VARCHAR(20) CHECK (shipment_status IN ('pending','shipped','delivered','returned')),
+    shipped_at       TIMESTAMP,
+    delivered_at     TIMESTAMP
+);
+
+CREATE TABLE support_tickets (
+    ticket_id     SERIAL PRIMARY KEY,
+    customer_id   INT REFERENCES customers(customer_id),
+    issue_type    VARCHAR(40),
+    priority      VARCHAR(10) CHECK (priority IN ('low','medium','high')),
+    status        VARCHAR(20) CHECK (status IN ('open','resolved')),
+    created_at    TIMESTAMP,
+    resolved_at   TIMESTAMP
+);
+
 -- Customers
 INSERT INTO customers (first_name,last_name,email,country,age,signup_date,is_premium) VALUES
 ('Alice',  'Nguyen',   'alice@example.com',  'Pakistan',28,'2021-03-14',TRUE),
@@ -152,6 +180,62 @@ INSERT INTO events (customer_id,event_type,event_ts,metadata) VALUES
 (13,'page_view',   '2024-02-07 10:00:00','{"page":"premium"}'),
 (13,'checkout',    '2024-02-08 16:19:00','{"order_id":13}');
 
+-- Payments
+INSERT INTO payments (order_id,payment_method,payment_status,amount,paid_at) VALUES
+(1,'card','captured',164.98,'2024-01-03 09:15:10'),
+(2,'wallet','captured',39.99,'2024-01-05 14:30:12'),
+(3,'card','refunded',89.99,'2024-01-08 09:00:00'),
+(4,'bank_transfer','captured',84.98,'2024-01-10 16:46:00'),
+(5,'card','captured',199.98,'2024-01-12 08:21:00'),
+(6,'card','captured',29.99,'2024-01-15 13:11:00'),
+(7,'card','failed',74.99,'2024-01-18 10:06:00'),
+(8,'wallet','captured',124.97,'2024-01-20 15:56:00'),
+(9,'card','captured',49.99,'2024-01-22 09:41:00'),
+(10,'card','captured',59.99,'2024-01-25 12:01:00'),
+(11,'bank_transfer','captured',149.99,'2024-02-01 11:31:00'),
+(12,'card','refunded',34.99,'2024-02-04 12:00:00'),
+(13,'card','captured',89.98,'2024-02-05 09:01:00'),
+(14,'card','captured',249.97,'2024-02-08 16:21:00'),
+(15,'wallet','captured',22.99,'2024-02-10 10:46:00'),
+(16,'card','captured',174.98,'2024-02-12 13:31:00'),
+(17,'card','captured',18.99,'2024-02-15 08:56:00'),
+(18,'card','captured',49.99,'2024-02-18 15:11:00'),
+(19,'wallet','captured',119.98,'2024-02-20 11:26:00'),
+(20,'card','captured',39.99,'2024-02-22 14:01:00');
+
+-- Shipments
+INSERT INTO shipments (order_id,carrier,shipment_status,shipped_at,delivered_at) VALUES
+(1,'DHL','delivered','2024-01-03 18:00:00','2024-01-05 12:00:00'),
+(2,'Leopards','delivered','2024-01-06 08:00:00','2024-01-07 13:00:00'),
+(3,'DHL','returned','2024-01-07 18:00:00','2024-01-10 15:00:00'),
+(4,'TCS','delivered','2024-01-11 09:00:00','2024-01-12 16:00:00'),
+(5,'DHL','delivered','2024-01-13 12:00:00','2024-01-15 18:30:00'),
+(6,'Bykea','delivered','2024-01-15 18:00:00','2024-01-15 21:00:00'),
+(7,'TCS','pending',NULL,NULL),
+(8,'DHL','delivered','2024-01-21 09:00:00','2024-01-23 11:30:00'),
+(9,'Bykea','delivered','2024-01-22 15:00:00','2024-01-22 19:00:00'),
+(10,'DHL','delivered','2024-01-26 10:00:00','2024-01-28 14:00:00'),
+(11,'TCS','delivered','2024-02-02 09:30:00','2024-02-05 12:30:00'),
+(12,'DHL','returned','2024-02-03 10:00:00','2024-02-06 17:00:00'),
+(13,'DHL','delivered','2024-02-05 17:00:00','2024-02-07 10:00:00'),
+(14,'Leopards','delivered','2024-02-09 10:00:00','2024-02-10 13:00:00'),
+(15,'Bykea','delivered','2024-02-10 14:00:00','2024-02-10 18:00:00'),
+(16,'DHL','delivered','2024-02-13 09:00:00','2024-02-15 12:00:00'),
+(17,'Bykea','delivered','2024-02-15 13:00:00','2024-02-15 17:00:00'),
+(18,'DHL','delivered','2024-02-19 09:00:00','2024-02-20 14:00:00'),
+(19,'Leopards','delivered','2024-02-21 08:30:00','2024-02-22 11:00:00'),
+(20,'Bykea','delivered','2024-02-22 17:00:00','2024-02-22 20:00:00');
+
+-- Support tickets
+INSERT INTO support_tickets (customer_id,issue_type,priority,status,created_at,resolved_at) VALUES
+(3,'return_request','medium','resolved','2024-01-09 09:00:00','2024-01-10 14:00:00'),
+(6,'payment_failure','high','open','2024-01-18 10:20:00',NULL),
+(8,'shipping_delay','low','resolved','2024-01-24 11:00:00','2024-01-25 10:30:00'),
+(11,'refund_status','medium','resolved','2024-02-04 12:30:00','2024-02-06 13:00:00'),
+(13,'bulk_order_help','low','resolved','2024-02-09 09:00:00','2024-02-09 12:00:00'),
+(14,'product_question','low','resolved','2024-02-10 12:00:00','2024-02-10 13:30:00'),
+(15,'shipment_tracking','medium','resolved','2024-02-13 10:00:00','2024-02-13 11:15:00');
+
 -- Analyst views
 CREATE VIEW customer_summary AS
 SELECT c.customer_id,
@@ -174,3 +258,16 @@ SELECT p.product_id, p.name, p.category,
 FROM products p
 LEFT JOIN order_items oi ON p.product_id=oi.product_id
 GROUP BY p.product_id,p.name,p.category;
+
+CREATE VIEW order_ops_overview AS
+SELECT
+    o.order_id,
+    o.customer_id,
+    o.status AS order_status,
+    p.payment_status,
+    s.shipment_status,
+    o.total_amount,
+    o.order_date
+FROM orders o
+LEFT JOIN payments p ON o.order_id = p.order_id
+LEFT JOIN shipments s ON o.order_id = s.order_id;

@@ -1,0 +1,26 @@
+version: 2
+
+models:
+  - name: customer_360
+    description: Customer level mart used by Feast, notebooks, and model training.
+    columns:
+      - name: customer_id
+        tests: [not_null, unique]
+      - name: total_orders
+        tests:
+          - not_null
+      - name: lifetime_value
+        tests:
+          - not_null
+      - name: churn_label
+        tests:
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+  - name: customer_behavior
+    description: Customer engagement metrics derived from the events stream.
+  - name: product_performance
+    description: Product sales mart exposed to Superset and Trino.
+  - name: churn_training_dataset
+    description: Final feature matrix for model training and drift monitoring.

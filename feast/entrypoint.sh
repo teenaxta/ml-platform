@@ -1,5 +1,10 @@
 #!/bin/sh
 set -e
+
+if [ "$#" -gt 0 ]; then
+  exec "$@"
+fi
+
 cd /opt/feast/project
 
 echo "[Feast] Enabling pgvector extension..."

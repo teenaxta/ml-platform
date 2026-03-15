@@ -1,23 +1,8 @@
-# ============================================================
-#  Demo PostgreSQL  —  docker-compose.demo-postgres.yml
+# Optional standalone source database.
 #
-#  Simulates one of your real source databases.
-#  Has a retail dataset pre-loaded (customers, orders, products,
-#  order_items, events) plus two analyst views.
-#
-#  IMPORTANT: Start the main stack first so the mlplatform
-#  network exists, then start this file:
-#
-#    docker compose up -d
-#    docker compose -f docker-compose.demo-postgres.yml up -d
-#
-#  Connection (from outside Docker / CloudBeaver):
-#    Host: YOUR_SERVER_LAN_IP   Port: 5433
-#    DB: retail_db   User: analyst   Pass: analyst123
-#
-#  Connection (from inside Docker / Spark / Jupyter):
-#    Host: demo-postgres         Port: 5432
-# ============================================================
+# The main `docker-compose.yml` already includes `demo-postgres`.
+# Keep this file only if you want to run the source database by itself
+# against the shared `mlplatform` Docker network.
 
 services:
   demo-postgres:

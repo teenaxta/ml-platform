@@ -1,0 +1,8 @@
+{
+  "name": "churn-model",
+  "implementation": "mlserver_sklearn.SKLearnModel",
+  "parameters": {
+    "uri": "./model.joblib",
+    "version": "v1"
+  }
+}

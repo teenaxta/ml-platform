@@ -1,0 +1,13 @@
+ml_platform:
+  target: dev
+  outputs:
+    dev:
+      type: trino
+      method: none
+      host: trino
+      port: 8080
+      user: trino
+      catalog: iceberg
+      schema: analytics
+      threads: 4
+      http_scheme: http

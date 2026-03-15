@@ -8,7 +8,8 @@ RUN pip install --no-cache-dir \
     psycopg2-binary \
     pgvector \
     pandas \
-    pyarrow
+    pyarrow \
+    s3fs
 
 WORKDIR /opt/feast/project
 

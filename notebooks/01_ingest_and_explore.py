@@ -1,120 +1,109 @@
-# notebooks/01_ingest_and_explore.py
-# Run this in JupyterHub — paste cells one at a time
-# or use: File > Open from Text > paste this file
+# Walkthrough 01: Ingest from Postgres, then inspect the lakehouse
 
-# ── Cell 1: Create Spark session ─────────────────────────────
-from pyspark.sql import SparkSession
 import os
+from pyspark.sql import SparkSession
 
-spark = SparkSession.builder \
-    .appName("RetailIngest") \
-    .config("spark.hadoop.fs.s3a.access.key",  os.environ.get("AWS_ACCESS_KEY_ID", "mlplatform")) \
-    .config("spark.hadoop.fs.s3a.secret.key",  os.environ.get("AWS_SECRET_ACCESS_KEY", "Minio@Secure123")) \
-    .getOrCreate()
 
-spark.sql("CREATE NAMESPACE IF NOT EXISTS warehouse.retail")
-print("Spark ready. Iceberg namespace created.")
+os.environ.setdefault("JAVA_HOME", "/usr/lib/jvm/default-java")
 
-# ── Cell 2: Ingest all tables from demo-postgres ─────────────
-jdbc_url = "jdbc:postgresql://demo-postgres:5432/retail_db"
+PACKAGES = ",".join(
+    [
+        "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.5.2",
+        "org.apache.iceberg:iceberg-aws-bundle:1.5.2",
+        "software.amazon.awssdk:url-connection-client:2.25.53",
+        "org.apache.hadoop:hadoop-aws:3.3.4",
+        "com.amazonaws:aws-java-sdk-bundle:1.12.262",
+        "org.postgresql:postgresql:42.7.3",
+    ]
+)
+
+
+def get_spark() -> SparkSession:
+    if not os.path.exists(os.environ["JAVA_HOME"]):
+        raise RuntimeError(
+            "JAVA_HOME points to a missing path. Rebuild the jupyterhub image so Java is installed."
+        )
+
+    aws_access_key = os.environ.get("AWS_ACCESS_KEY_ID", "mlplatform")
+    aws_secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY", "MinioSecure123")
+    aws_region = os.environ.get("AWS_REGION", "us-east-1")
+    spark_master = os.environ.get("SPARK_MASTER", "spark://spark-master:7077")
+
+    return (
+        SparkSession.builder
+        .appName("RetailIngestWalkthrough")
+        .master(spark_master)
+        .config("spark.jars.packages", PACKAGES)
+        .config(
+            "spark.sql.extensions",
+            "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
+        )
+        .config("spark.sql.catalog.warehouse", "org.apache.iceberg.spark.SparkCatalog")
+        .config("spark.sql.catalog.warehouse.type", "jdbc")
+        .config(
+            "spark.sql.catalog.warehouse.uri",
+            os.environ.get(
+                "ICEBERG_JDBC_URI",
+                "jdbc:postgresql://postgres-iceberg:5432/iceberg_catalog",
+            ),
+        )
+        .config("spark.sql.catalog.warehouse.jdbc.user", os.environ.get("ICEBERG_JDBC_USER", "iceberg"))
+        .config(
+            "spark.sql.catalog.warehouse.jdbc.password",
+            os.environ.get("ICEBERG_JDBC_PASSWORD", "iceberg123"),
+        )
+        .config("spark.sql.catalog.warehouse.jdbc.schema-version", "V1")
+        .config("spark.sql.catalog.warehouse.warehouse", "s3://warehouse/")
+        .config("spark.sql.catalog.warehouse.io-impl", "org.apache.iceberg.aws.s3.S3FileIO")
+        .config("spark.sql.catalog.warehouse.http-client.type", "urlconnection")
+        .config("spark.sql.catalog.warehouse.client.region", aws_region)
+        .config("spark.sql.catalog.warehouse.s3.endpoint", os.environ.get("AWS_S3_ENDPOINT", "http://minio:9000"))
+        .config("spark.sql.catalog.warehouse.s3.path-style-access", "true")
+        .config("spark.sql.catalog.warehouse.s3.access-key-id", aws_access_key)
+        .config("spark.sql.catalog.warehouse.s3.secret-access-key", aws_secret_key)
+        .config("spark.hadoop.fs.s3a.endpoint", os.environ.get("AWS_S3_ENDPOINT", "http://minio:9000"))
+        .config("spark.hadoop.fs.s3a.path.style.access", "true")
+        .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
+        .config(
+            "spark.hadoop.fs.s3a.aws.credentials.provider",
+            "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider",
+        )
+        .config("spark.hadoop.fs.s3a.access.key", aws_access_key)
+        .config("spark.hadoop.fs.s3a.secret.key", aws_secret_key)
+        .getOrCreate()
+    )
+
+
+spark = get_spark()
+
+demo_postgres_host = os.environ.get("DEMO_POSTGRES_HOST", "demo-postgres")
+demo_postgres_port = os.environ.get("DEMO_POSTGRES_PORT", "5432")
+demo_postgres_db = os.environ.get("DEMO_POSTGRES_DB", "retail_db")
+
+jdbc_url = f"jdbc:postgresql://{demo_postgres_host}:{demo_postgres_port}/{demo_postgres_db}"
 jdbc_props = {
-    "user":     "analyst",
-    "password": "analyst123",
-    "driver":   "org.postgresql.Driver"
+    "user": os.environ.get("DEMO_POSTGRES_USER", "analyst"),
+    "password": os.environ.get("DEMO_POSTGRES_PASSWORD", "analyst123"),
+    "driver": "org.postgresql.Driver",
 }
 
-tables = ["customers", "orders", "order_items", "events", "products"]
-for table in tables:
+raw_tables = [
+    "customers",
+    "products",
+    "orders",
+    "order_items",
+    "events",
+    "payments",
+    "shipments",
+    "support_tickets",
+]
+
+spark.sql("CREATE NAMESPACE IF NOT EXISTS warehouse.retail_raw")
+
+for table in raw_tables:
     df = spark.read.jdbc(jdbc_url, f"public.{table}", properties=jdbc_props)
-    df.writeTo(f"warehouse.retail.{table}").createOrReplace()
-    print(f"  {table}: {df.count()} rows → warehouse.retail.{table}")
+    df.writeTo(f"warehouse.retail_raw.{table}").createOrReplace()
+    print(f"{table}: {df.count()} rows")
 
-print("Ingest complete. Check MinIO at http://localhost:9001 → warehouse bucket.")
-
-# ── Cell 3: Verify data in Iceberg ───────────────────────────
-spark.sql("SHOW TABLES IN warehouse.retail").show()
-spark.sql("SELECT * FROM warehouse.retail.customers LIMIT 5").show()
-
-# ── Cell 4: Create feature table for Feast ───────────────────
-from pyspark.sql import functions as F
-
-customer_features = spark.sql("""
-    SELECT
-        c.customer_id,
-        c.age,
-        c.country,
-        c.is_premium,
-        COALESCE(o.total_orders, 0)         AS total_orders,
-        COALESCE(o.lifetime_value, 0.0)     AS lifetime_value,
-        COALESCE(o.days_since_last_order, 999) AS days_since_last_order,
-        COALESCE(o.avg_order_value, 0.0)    AS avg_order_value,
-        current_timestamp()                 AS event_timestamp
-    FROM warehouse.retail.customers c
-    LEFT JOIN (
-        SELECT
-            customer_id,
-            COUNT(*)                               AS total_orders,
-            SUM(total_amount)                      AS lifetime_value,
-            AVG(total_amount)                      AS avg_order_value,
-            DATEDIFF(current_date(), MAX(order_date)) AS days_since_last_order
-        FROM warehouse.retail.orders
-        WHERE status = 'completed'
-        GROUP BY customer_id
-    ) o ON c.customer_id = o.customer_id
-""")
-
-# Write as Parquet to MinIO so Feast can read it
-customer_features.write \
-    .mode("overwrite") \
-    .parquet("s3a://warehouse/retail/customer_features/")
-
-print(f"Feature table written: {customer_features.count()} rows")
-customer_features.show()
-
-# ── Cell 5: Create behavioral feature table ──────────────────
-behavior_features = spark.sql("""
-    SELECT
-        customer_id,
-        COUNT(*) FILTER (WHERE event_type = 'page_view')     AS page_views_30d,
-        COUNT(*) FILTER (WHERE event_type = 'add_to_cart')   AS add_to_cart_30d,
-        COUNT(*) FILTER (WHERE event_type = 'support_ticket') AS support_tickets,
-        CASE
-            WHEN COUNT(*) FILTER (WHERE event_type='add_to_cart') = 0 THEN 0.0
-            ELSE COUNT(*) FILTER (WHERE event_type='checkout') * 1.0
-               / COUNT(*) FILTER (WHERE event_type='add_to_cart')
-        END AS checkout_rate,
-        current_timestamp() AS event_timestamp
-    FROM warehouse.retail.events
-    GROUP BY customer_id
-""")
-
-behavior_features.write \
-    .mode("overwrite") \
-    .parquet("s3a://warehouse/retail/customer_behavior/")
-
-print(f"Behavior features written: {behavior_features.count()} rows")
-
-# ── Cell 6: Retrieve features from Feast ─────────────────────
-# (Run this AFTER feast apply has completed — check container logs)
-import pandas as pd
-from feast import FeatureStore
-
-store = FeatureStore(repo_path="/opt/feast/project")
-
-entity_df = pd.DataFrame({
-    "customer_id":      [1, 2, 3, 4, 5],
-    "event_timestamp":  pd.Timestamp.now(tz="UTC")
-})
-
-features = store.get_historical_features(
-    entity_df=entity_df,
-    features=[
-        "customer_stats:total_orders",
-        "customer_stats:lifetime_value",
-        "customer_stats:days_since_last_order",
-        "customer_stats:is_premium",
-        "customer_behavior:support_tickets",
-    ]
-).to_df()
-
-print(features)
+spark.sql("SHOW TABLES IN warehouse.retail_raw").show(truncate=False)
+spark.sql("SELECT * FROM warehouse.retail_raw.orders LIMIT 5").show()

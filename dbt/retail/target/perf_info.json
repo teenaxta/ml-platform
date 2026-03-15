@@ -1,0 +1,51 @@
+{
+    "path_count": 148,
+    "parsed_path_count": 148,
+    "static_analysis_path_count": 15,
+    "static_analysis_parsed_path_count": 15,
+    "is_partial_parse_enabled": true,
+    "is_static_analysis_enabled": true,
+    "read_files_elapsed": 0.13296691700816154,
+    "load_macros_elapsed": 0.971807000998524,
+    "parse_project_elapsed": 1.6746098750008969,
+    "patch_sources_elapsed": 0.03410670800076332,
+    "process_manifest_elapsed": 0.0357990000047721,
+    "load_all_elapsed": 3.21182629300165,
+    "projects": [
+        {
+            "project_name": "retail",
+            "elapsed": 1.6541025849874131,
+            "parsers": [
+                {
+                    "parser": "model",
+                    "elapsed": 1.0207621669978835,
+                    "parsed_path_count": 15
+                },
+                {
+                    "parser": "test",
+                    "elapsed": 0.5321844590071123,
+                    "parsed_path_count": 3
+                }
+            ],
+            "parsed_path_count": 18
+        },
+        {
+            "project_name": "dbt_trino",
+            "elapsed": 0.0063682910113129765,
+            "parsers": [],
+            "parsed_path_count": 0
+        },
+        {
+            "project_name": "dbt",
+            "elapsed": 0.013348542008316144,
+            "parsers": [
+                {
+                    "parser": "doc",
+                    "elapsed": 0.0008404169930145144,
+                    "parsed_path_count": 1
+                }
+            ],
+            "parsed_path_count": 1
+        }
+    ]
+}

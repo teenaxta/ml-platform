@@ -3,11 +3,11 @@ FROM ghcr.io/mlflow/mlflow:v3.10.1
 
 # psycopg2-binary: PostgreSQL driver
 # boto3: S3/MinIO artifact store
-# mlflow[auth]==3.10.1: pulls in Flask-Login and CSRF deps for basic-auth app
+# mlflow[auth,genai]==3.10.1: basic-auth UI plus GenAI credential management
 RUN pip install --no-cache-dir \
     psycopg2-binary \
     boto3 \
-    'mlflow[auth]==3.10.1'
+    'mlflow[auth,genai]==3.10.1'
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

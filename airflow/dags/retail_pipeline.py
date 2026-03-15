@@ -1,19 +1,19 @@
 """
-retail_pipeline.py  —  end-to-end ML pipeline DAG
+retail_pipeline.py
 
-Schedule: daily at 02:00
-Steps:
-  1. ingest_postgres   — pulls data from demo-postgres into Iceberg via Spark
-  2. dbt_run           — runs dbt models to produce clean feature tables
-  3. dbt_test          — validates dbt models
-  4. feast_materialize — materialises features from offline → online store
-
-To trigger manually: Airflow UI → retail_ml_pipeline → ▶ Trigger DAG
+Daily orchestration for the teaching stack:
+  1. Ingest source tables from demo-postgres into Iceberg
+  2. Run dbt models and tests through Trino
+  3. Publish feature parquet files for Feast and materialize them
+  4. Validate marts with Great Expectations
+  5. Train and log a model, then generate monitoring artifacts
 """
+
+from datetime import datetime, timedelta
 
 from airflow import DAG
 from airflow.operators.bash import BashOperator
-from datetime import datetime, timedelta
+
 
 default_args = {
     "owner": "ml-platform",
@@ -22,68 +22,43 @@ default_args = {
     "email_on_failure": False,
 }
 
+BOOTSTRAP = "python /opt/bootstrap/seed_demo.py"
+
 with DAG(
     dag_id="retail_ml_pipeline",
     default_args=default_args,
-    description="Ingest → dbt transform → feature materialisation",
+    description="Ingest → transform → validate → feature store → training",
     start_date=datetime(2024, 1, 1),
-    schedule="0 2 * * *",   # 02:00 every day
+    schedule="0 2 * * *",
     catchup=False,
-    tags=["ml", "retail"],
+    tags=["ml", "retail", "teaching"],
 ) as dag:
-
-    # ── Step 1: Ingest from Postgres into Iceberg ─────────────
-    # Runs the ingest notebook as a script inside JupyterHub's container.
-    # Alternatively, call Airbyte's API here for automated CDC sync.
     ingest = BashOperator(
-        task_id="ingest_postgres",
-        bash_command="""
-            docker exec jupyterhub python3 -c "
-from pyspark.sql import SparkSession
-import os
-
-spark = SparkSession.builder \\
-    .appName('DailyIngest') \\
-    .config('spark.hadoop.fs.s3a.access.key', os.environ['AWS_ACCESS_KEY_ID']) \\
-    .config('spark.hadoop.fs.s3a.secret.key', os.environ['AWS_SECRET_ACCESS_KEY']) \\
-    .getOrCreate()
-
-jdbc = 'jdbc:postgresql://demo-postgres:5432/retail_db'
-props = {'user': 'analyst', 'password': 'analyst123', 'driver': 'org.postgresql.Driver'}
-
-spark.sql('CREATE NAMESPACE IF NOT EXISTS warehouse.retail')
-for table in ['customers', 'orders', 'order_items', 'events', 'products']:
-    df = spark.read.jdbc(jdbc, f'public.{table}', properties=props)
-    df.writeTo(f'warehouse.retail.{table}').createOrReplace()
-    print(f'Loaded {table}: {df.count()} rows')
-"
-        """,
-        doc_md="Pulls all retail tables from demo-postgres into Iceberg on MinIO.",
+        task_id="ingest_raw",
+        bash_command=f"{BOOTSTRAP} --step ingest_raw",
+        doc_md="Loads source tables from demo Postgres into Iceberg.",
     )
 
-    # ── Step 2: Run dbt models ─────────────────────────────────
     dbt_run = BashOperator(
-        task_id="dbt_run",
-        bash_command="docker exec dbt bash -c 'cd /opt/dbt/retail && dbt run --profiles-dir /opt/dbt'",
-        doc_md="Transforms raw Iceberg tables into clean feature models.",
+        task_id="dbt_run_and_test",
+        bash_command=(
+            "dbt deps --project-dir /opt/dbt/retail --profiles-dir /opt/dbt && "
+            "dbt run --project-dir /opt/dbt/retail --profiles-dir /opt/dbt && "
+            "dbt test --project-dir /opt/dbt/retail --profiles-dir /opt/dbt"
+        ),
+        doc_md="Builds analytics marts through Trino.",
     )
 
-    # ── Step 3: Test dbt models ────────────────────────────────
-    dbt_test = BashOperator(
-        task_id="dbt_test",
-        bash_command="docker exec dbt bash -c 'cd /opt/dbt/retail && dbt test --profiles-dir /opt/dbt'",
-        doc_md="Runs dbt data quality tests. Fails the pipeline if tests fail.",
+    post_dbt = BashOperator(
+        task_id="publish_features_and_train",
+        bash_command=f"{BOOTSTRAP} --step post_dbt",
+        doc_md="Publishes Feast parquet sources and trains the demo churn model.",
     )
 
-    # ── Step 4: Materialise features into Feast online store ───
-    feast_materialize = BashOperator(
-        task_id="feast_materialize",
-        bash_command="""
-            docker exec feast feast -c /opt/feast/project materialize-incremental \
-                $(date -u +%Y-%m-%dT%H:%M:%S)
-        """,
-        doc_md="Pushes latest feature values from offline (MinIO) to online (SQLite) store.",
+    docs_refresh = BashOperator(
+        task_id="refresh_docs_index",
+        bash_command="test -f /opt/platform/bootstrap/seed_manifest.json",
+        doc_md="Confirms that the teaching artifacts were regenerated.",
     )
 
-    # ── Pipeline order ─────────────────────────────────────────
-    ingest >> dbt_run >> dbt_test >> feast_materialize
+    ingest >> dbt_run >> post_dbt >> docs_refresh

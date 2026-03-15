@@ -1,16 +1,15 @@
 # ============================================================
 #  Open-Source ML Platform Stack
-#  Services: MinIO · Iceberg REST · Spark · JupyterHub
-#            dbt · Airflow · Feast · MLflow · MLServer · CloudBeaver
-#
-#  First-time setup:
-#    cp .env.example .env        # edit passwords
-#    docker compose build        # build custom images
-#    docker compose up -d        # start everything
+#  Services: MinIO · Iceberg REST · Spark · JupyterHub · dbt
+#            Airflow · Feast · MLflow · MLServer · Superset
+#            Great Expectations · Evidently · Trino
+#            Prometheus · Grafana · CloudBeaver
 # ============================================================
 
 x-airflow-common: &airflow-common
-  image: apache/airflow:2.9.3
+  build:
+    context: ./airflow
+    dockerfile: Dockerfile
   platform: linux/amd64
   environment: &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
@@ -21,28 +20,37 @@ x-airflow-common: &airflow-common
     AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY}
     AIRFLOW__WEBSERVER__RBAC: "true"
     AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth
+    JAVA_HOME: /usr/lib/jvm/default-java
+    ROOT_DIR: /opt/platform
+    DBT_PROFILES_DIR: /opt/dbt
     MINIO_ENDPOINT: http://minio:9000
     MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
     MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
     ICEBERG_REST_URL: http://iceberg-rest:8181
     SPARK_MASTER_URL: spark://spark-master:7077
+    TRINO_HOST: trino
+    TRINO_PORT: "8080"
+    MLFLOW_TRACKING_URI: http://mlflow:5000
+    MLFLOW_TRACKING_USERNAME: ${MLFLOW_ADMIN_USERNAME:-admin}
+    MLFLOW_TRACKING_PASSWORD: ${MLFLOW_ADMIN_PASSWORD:-MLflowAdmin777}
+    FEAST_DB_PASSWORD: ${FEAST_DB_PASSWORD}
   volumes:
+    - ./:/opt/platform
     - ./airflow/dags:/opt/airflow/dags
     - ./airflow/logs:/opt/airflow/logs
     - ./airflow/plugins:/opt/airflow/plugins
     - ./dbt:/opt/dbt
+    - ./bootstrap:/opt/bootstrap
+    - ./great_expectations:/opt/great_expectations
+    - ./evidently:/opt/evidently
+    - ./mlserver/models:/opt/mlserver/models
+    - ./spark/conf/spark-defaults.conf:/opt/bootstrap/spark-defaults.conf:ro
   depends_on:
     postgres-airflow:
       condition: service_healthy
   restart: unless-stopped
 
 services:
-
-  # ────────────────────────────────────────────────────────────
-  #  1. MinIO  —  S3-compatible object storage
-  #     Console: http://localhost:9001
-  #     API:     http://localhost:9000
-  # ────────────────────────────────────────────────────────────
   minio:
     image: minio/minio:RELEASE.2024-05-10T01-41-38Z
     platform: linux/amd64
@@ -56,7 +64,6 @@ services:
       - "9001:9001"
     volumes:
       - minio_data:/data
-    # No healthcheck: minio server image does not include 'mc' or curl
     restart: unless-stopped
 
   minio-init:
@@ -78,14 +85,27 @@ services:
         mc mb --ignore-existing local/feast-offline;
         mc mb --ignore-existing local/feast-registry;
         mc mb --ignore-existing local/mlflow-artifacts;
+        mc mb --ignore-existing local/monitoring;
         echo 'Buckets ready.';
       "
     restart: on-failure
 
-  # ────────────────────────────────────────────────────────────
-  #  2. Iceberg REST Catalog
-  #     API: http://localhost:8181
-  # ────────────────────────────────────────────────────────────
+  postgres-iceberg:
+    image: postgres:15
+    platform: linux/amd64
+    container_name: postgres-iceberg
+    environment:
+      POSTGRES_USER: iceberg
+      POSTGRES_PASSWORD: iceberg123
+      POSTGRES_DB: iceberg_catalog
+    volumes:
+      - postgres_iceberg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "iceberg", "-d", "iceberg_catalog"]
+      interval: 10s
+      retries: 5
+    restart: unless-stopped
+
   iceberg-rest:
     image: tabulario/iceberg-rest:0.10.0
     platform: linux/amd64
@@ -93,23 +113,25 @@ services:
     depends_on:
       minio-init:
         condition: service_completed_successfully
+      postgres-iceberg:
+        condition: service_healthy
     ports:
       - "8181:8181"
     environment:
       AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
       AWS_REGION: us-east-1
+      CATALOG_CATALOG__IMPL: org.apache.iceberg.jdbc.JdbcCatalog
+      CATALOG_URI: jdbc:postgresql://postgres-iceberg:5432/iceberg_catalog
+      CATALOG_JDBC_USER: iceberg
+      CATALOG_JDBC_PASSWORD: iceberg123
+      CATALOG_JDBC_SCHEMA__VERSION: V1
       CATALOG_WAREHOUSE: s3://warehouse/
       CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
       CATALOG_S3_ENDPOINT: http://minio:9000
       CATALOG_S3_PATH__STYLE__ACCESS: "true"
     restart: unless-stopped
 
-  # ────────────────────────────────────────────────────────────
-  #  3. Apache Spark  —  distributed compute
-  #     Master UI: http://localhost:8080
-  #     Worker UI: http://localhost:8081
-  # ────────────────────────────────────────────────────────────
   spark-master:
     image: bitnamilegacy/spark:3.5.1
     platform: linux/amd64
@@ -117,6 +139,10 @@ services:
     environment:
       SPARK_MODE: master
       SPARK_MASTER_HOST: spark-master
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
       SPARK_RPC_AUTHENTICATION_ENABLED: "no"
       SPARK_RPC_ENCRYPTION_ENABLED: "no"
       SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED: "no"
@@ -137,6 +163,10 @@ services:
     environment:
       SPARK_MODE: worker
       SPARK_MASTER_URL: spark://spark-master:7077
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
       SPARK_WORKER_MEMORY: ${SPARK_WORKER_MEMORY:-8G}
       SPARK_WORKER_CORES: ${SPARK_WORKER_CORES:-4}
       SPARK_RPC_AUTHENTICATION_ENABLED: "no"
@@ -149,11 +179,25 @@ services:
       - ./spark/conf/spark-defaults.conf:/opt/bitnami/spark/conf/spark-defaults.conf:ro
     restart: unless-stopped
 
-  # ────────────────────────────────────────────────────────────
-  #  4. JupyterHub  —  multi-user notebook server
-  #     UI:    http://localhost:8888
-  #     Admin: http://localhost:8888/hub/admin
-  # ────────────────────────────────────────────────────────────
+  demo-postgres:
+    image: postgres:15
+    platform: linux/amd64
+    container_name: demo-postgres
+    environment:
+      POSTGRES_DB: retail_db
+      POSTGRES_USER: analyst
+      POSTGRES_PASSWORD: analyst123
+    ports:
+      - "5433:5432"
+    volumes:
+      - demo_postgres_data:/var/lib/postgresql/data
+      - ./demo-postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "analyst", "-d", "retail_db"]
+      interval: 10s
+      retries: 5
+    restart: unless-stopped
+
   jupyterhub:
     build:
       context: ./jupyterhub
@@ -163,6 +207,8 @@ services:
       - spark-master
       - iceberg-rest
       - postgres-jupyterhub
+      - demo-postgres
+      - trino
     ports:
       - "8888:8000"
     environment:
@@ -170,14 +216,34 @@ services:
       JUPYTERHUB_ADMIN_PASSWORD: ${JUPYTERHUB_ADMIN_PASSWORD}
       JUPYTERHUB_DB_URL: postgresql+psycopg2://jupyterhub:${JUPYTERHUB_DB_PASSWORD}@postgres-jupyterhub:5432/jupyterhub
       SPARK_MASTER: spark://spark-master:7077
+      TRINO_HOST: trino
+      TRINO_PORT: "8080"
+      TRINO_USER: trino
+      TRINO_CATALOG: iceberg
+      TRINO_SCHEMA: analytics
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_TRACKING_USERNAME: ${MLFLOW_ADMIN_USERNAME:-admin}
+      MLFLOW_TRACKING_PASSWORD: ${MLFLOW_ADMIN_PASSWORD:-MLflowAdmin777}
+      ICEBERG_JDBC_URI: jdbc:postgresql://postgres-iceberg:5432/iceberg_catalog
+      ICEBERG_JDBC_USER: iceberg
+      ICEBERG_JDBC_PASSWORD: iceberg123
+      DEMO_POSTGRES_HOST: demo-postgres
+      DEMO_POSTGRES_PORT: "5432"
+      DEMO_POSTGRES_DB: retail_db
+      DEMO_POSTGRES_USER: analyst
+      DEMO_POSTGRES_PASSWORD: analyst123
       AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
       AWS_S3_ENDPOINT: http://minio:9000
     volumes:
       - ./jupyterhub/jupyterhub_config.py:/srv/jupyterhub/jupyterhub_config.py:ro
       - ./notebooks:/srv/jupyterhub/notebooks
-      - jupyterhub_data:/srv/jupyterhub/data
+      - ./great_expectations:/srv/jupyterhub/great_expectations
+      - ./evidently:/srv/jupyterhub/evidently
       - ./spark/conf/spark-defaults.conf:/usr/local/spark/conf/spark-defaults.conf:ro
+      - jupyterhub_data:/srv/jupyterhub/data
     restart: unless-stopped
 
   postgres-jupyterhub:
@@ -196,31 +262,33 @@ services:
       retries: 5
     restart: unless-stopped
 
-  # ────────────────────────────────────────────────────────────
-  #  5. dbt Core  —  SQL transformation
-  #     Run:  docker compose exec dbt dbt run --project-dir retail
-  #     Docs: http://localhost:8090  (after dbt docs serve)
-  # ────────────────────────────────────────────────────────────
   dbt:
-    image: ghcr.io/dbt-labs/dbt-spark:1.8.0
+    build:
+      context: ./dbt
+      dockerfile: Dockerfile
     platform: linux/amd64
     container_name: dbt
     depends_on:
-      - spark-master
+      trino:
+        condition: service_healthy
     entrypoint: ["tail", "-f", "/dev/null"]
     working_dir: /opt/dbt
     environment:
       DBT_PROFILES_DIR: /opt/dbt
     volumes:
       - ./dbt:/opt/dbt
-    ports:
-      - "8090:8080"
     restart: unless-stopped
 
-  # ────────────────────────────────────────────────────────────
-  #  6. Airflow  —  pipeline orchestration
-  #     UI: http://localhost:8082
-  # ────────────────────────────────────────────────────────────
+  dbt-docs:
+    image: nginx:1.27-alpine
+    platform: linux/amd64
+    container_name: dbt-docs
+    ports:
+      - "8090:80"
+    volumes:
+      - ./dbt/retail/target:/usr/share/nginx/html:ro
+    restart: unless-stopped
+
   postgres-airflow:
     image: postgres:15
     platform: linux/amd64
@@ -279,14 +347,23 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
-  # ────────────────────────────────────────────────────────────
-  #  7. Feast  —  feature store
-  #     API:    http://localhost:6566
-  #     UI:     http://localhost:6567
-  #
-  #  A ready-to-run Feast project is pre-configured in ./feast/project/
-  #  On first start it runs `feast apply` automatically.
-  # ────────────────────────────────────────────────────────────
+  postgres-feast:
+    image: pgvector/pgvector:pg15
+    platform: linux/amd64
+    container_name: postgres-feast
+    environment:
+      POSTGRES_USER: feast
+      POSTGRES_PASSWORD: ${FEAST_DB_PASSWORD}
+      POSTGRES_DB: feast
+    volumes:
+      - postgres_feast_data:/var/lib/postgresql/data
+      - ./feast/init-pgvector.sql:/docker-entrypoint-initdb.d/init-pgvector.sql:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "feast"]
+      interval: 10s
+      retries: 5
+    restart: unless-stopped
+
   feast:
     build:
       context: ./feast
@@ -310,29 +387,6 @@ services:
       - ./feast/project:/opt/feast/project
     restart: unless-stopped
 
-  postgres-feast:
-    image: pgvector/pgvector:pg15
-    platform: linux/amd64
-    container_name: postgres-feast
-    environment:
-      POSTGRES_USER: feast
-      POSTGRES_PASSWORD: ${FEAST_DB_PASSWORD}
-      POSTGRES_DB: feast
-    volumes:
-      - postgres_feast_data:/var/lib/postgresql/data
-      - ./feast/init-pgvector.sql:/docker-entrypoint-initdb.d/init-pgvector.sql:ro
-    healthcheck:
-      test: ["CMD", "pg_isready", "-U", "feast"]
-      interval: 10s
-      retries: 5
-    restart: unless-stopped
-
-  # ────────────────────────────────────────────────────────────
-  #  8. MLflow  —  experiment tracking & model registry
-  #     UI: http://localhost:5000
-  #
-  #  Backend: Postgres (runs, params, metrics). Artifacts: MinIO (s3://mlflow-artifacts).
-  # ────────────────────────────────────────────────────────────
   postgres-mlflow:
     image: postgres:15
     platform: linux/amd64
@@ -362,33 +416,303 @@ services:
     ports:
       - "5000:5000"
     environment:
-      # ── Database / artifacts ─────────────────────────────────────
       MLFLOW_DB_PASSWORD: ${MLFLOW_DB_PASSWORD}
       MLFLOW_DEFAULT_ARTIFACT_ROOT: s3://mlflow-artifacts/
       AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
       MLFLOW_S3_ENDPOINT_URL: http://minio:9000
-      # ── Auth (basic-auth app) ────────────────────────────────────
-      # Required for CSRF protection — must be consistent across nodes
-      MLFLOW_FLASK_SERVER_SECRET_KEY: ${MLFLOW_FLASK_SECRET_KEY}
+      MLFLOW_FLASK_SERVER_SECRET_KEY: ${MLFLOW_FLASK_SECRET_KEY:-changeme-generate-a-real-secret-with-secrets-token-hex}
+      MLFLOW_CRYPTO_KEK_PASSPHRASE: ${MLFLOW_CRYPTO_KEK_PASSPHRASE:-mlflow-demo-kek-passphrase-change-me}
       MLFLOW_ADMIN_USERNAME: ${MLFLOW_ADMIN_USERNAME:-admin}
-      MLFLOW_ADMIN_PASSWORD: ${MLFLOW_ADMIN_PASSWORD}
-      # ── Workspaces ───────────────────────────────────────────────
+      MLFLOW_ADMIN_PASSWORD: ${MLFLOW_ADMIN_PASSWORD:-MLflowAdmin777}
       MLFLOW_ENABLE_WORKSPACES: "true"
+      MLFLOW_SERVER_ALLOWED_HOSTS: "*"
     restart: unless-stopped
 
-  # ────────────────────────────────────────────────────────────
-  #  9. MLServer  —  model serving (REST + gRPC)
-  #     REST: http://localhost:8085/v2
-  #     Docs: http://localhost:8085/v2/docs
-  #     gRPC: localhost:8086
-  #
-  #  Drop model folders into ./mlserver/models/ and restart.
-  # ────────────────────────────────────────────────────────────
+  postgres-superset:
+    image: postgres:15
+    platform: linux/amd64
+    container_name: postgres-superset
+    environment:
+      POSTGRES_USER: superset
+      POSTGRES_PASSWORD: ${SUPERSET_DB_PASSWORD:-SupersetDB444}
+      POSTGRES_DB: superset
+    volumes:
+      - postgres_superset_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "superset"]
+      interval: 10s
+      retries: 5
+    restart: unless-stopped
+
+  superset:
+    build:
+      context: ./superset
+      dockerfile: Dockerfile
+    platform: linux/amd64
+    container_name: superset
+    depends_on:
+      postgres-superset:
+        condition: service_healthy
+      trino:
+        condition: service_healthy
+    ports:
+      - "8088:8088"
+    environment:
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY:-superset-demo-secret-key}
+      SUPERSET_ADMIN_USERNAME: ${SUPERSET_ADMIN_USERNAME:-admin}
+      SUPERSET_ADMIN_PASSWORD: ${SUPERSET_ADMIN_PASSWORD:-SupersetAdmin888}
+      SUPERSET_ADMIN_EMAIL: ${SUPERSET_ADMIN_EMAIL:-admin@example.com}
+      SUPERSET_ADMIN_FIRSTNAME: ${SUPERSET_ADMIN_FIRSTNAME:-Admin}
+      SUPERSET_ADMIN_LASTNAME: ${SUPERSET_ADMIN_LASTNAME:-User}
+      SUPERSET_DB_PASSWORD: ${SUPERSET_DB_PASSWORD:-SupersetDB444}
+      SUPERSET_LOAD_EXAMPLES: ${SUPERSET_LOAD_EXAMPLES:-no}
+      PYTHONPATH: /app/pythonpath
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8088/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+    restart: unless-stopped
+
+  trino:
+    image: trinodb/trino:449
+    platform: linux/amd64
+    container_name: trino
+    user: "0:0"
+    depends_on:
+      demo-postgres:
+        condition: service_healthy
+      postgres-iceberg:
+        condition: service_healthy
+    ports:
+      - "8093:8080"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - ./trino/etc:/etc/trino:ro
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/v1/info"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  postgres-exporter-demo:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    platform: linux/amd64
+    container_name: postgres-exporter-demo
+    depends_on:
+      demo-postgres:
+        condition: service_healthy
+    environment:
+      DATA_SOURCE_NAME: postgresql://analyst:analyst123@demo-postgres:5432/retail_db?sslmode=disable
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.53.1
+    platform: linux/amd64
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      - postgres-exporter-demo
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    platform: linux/amd64
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-GrafanaAdmin555}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+  great-expectations-docs:
+    image: nginx:1.27-alpine
+    platform: linux/amd64
+    container_name: great-expectations-docs
+    ports:
+      - "8091:80"
+    volumes:
+      - ./great_expectations/uncommitted/data_docs/local_site:/usr/share/nginx/html:ro
+    restart: unless-stopped
+
+  evidently-ui:
+    image: nginx:1.27-alpine
+    platform: linux/amd64
+    container_name: evidently-ui
+    ports:
+      - "8092:80"
+    volumes:
+      - ./evidently/reports:/usr/share/nginx/html:ro
+    restart: unless-stopped
+
+  raw-bootstrap:
+    build:
+      context: ./bootstrap
+      dockerfile: Dockerfile
+    platform: linux/amd64
+    container_name: raw-bootstrap
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+      demo-postgres:
+        condition: service_healthy
+      spark-master:
+        condition: service_started
+      trino:
+        condition: service_healthy
+    working_dir: /workspace
+    environment:
+      ROOT_DIR: /workspace
+      JAVA_HOME: /usr/lib/jvm/default-java
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+      ICEBERG_JDBC_URI: jdbc:postgresql://postgres-iceberg:5432/iceberg_catalog
+      ICEBERG_JDBC_USER: iceberg
+      ICEBERG_JDBC_PASSWORD: iceberg123
+      SPARK_MASTER_URL: spark://spark-master:7077
+      TRINO_HOST: trino
+      TRINO_PORT: "8080"
+    command: ["python", "/workspace/bootstrap/seed_demo.py", "--step", "ingest_raw"]
+    volumes:
+      - ./:/workspace
+      - ./spark/conf/spark-defaults.conf:/workspace/bootstrap/spark-defaults.conf:ro
+    restart: "no"
+
+  dbt-bootstrap:
+    build:
+      context: ./dbt
+      dockerfile: Dockerfile
+    platform: linux/amd64
+    container_name: dbt-bootstrap
+    depends_on:
+      raw-bootstrap:
+        condition: service_completed_successfully
+      trino:
+        condition: service_healthy
+    working_dir: /opt/dbt
+    command:
+      [
+        "sh",
+        "-c",
+        "dbt deps --project-dir /opt/dbt/retail --profiles-dir /opt/dbt && dbt run --project-dir /opt/dbt/retail --profiles-dir /opt/dbt && dbt test --project-dir /opt/dbt/retail --profiles-dir /opt/dbt && dbt docs generate --project-dir /opt/dbt/retail --profiles-dir /opt/dbt --empty-catalog --static"
+      ]
+    environment:
+      DBT_PROFILES_DIR: /opt/dbt
+    volumes:
+      - ./dbt:/opt/dbt
+    restart: "no"
+
+  platform-bootstrap:
+    build:
+      context: ./bootstrap
+      dockerfile: Dockerfile
+    platform: linux/amd64
+    container_name: platform-bootstrap
+    depends_on:
+      dbt-bootstrap:
+        condition: service_completed_successfully
+      trino:
+        condition: service_healthy
+      mlflow:
+        condition: service_started
+    working_dir: /workspace
+    environment:
+      ROOT_DIR: /workspace
+      JAVA_HOME: /usr/lib/jvm/default-java
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+      ICEBERG_JDBC_URI: jdbc:postgresql://postgres-iceberg:5432/iceberg_catalog
+      ICEBERG_JDBC_USER: iceberg
+      ICEBERG_JDBC_PASSWORD: iceberg123
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_TRACKING_USERNAME: ${MLFLOW_ADMIN_USERNAME:-admin}
+      MLFLOW_TRACKING_PASSWORD: ${MLFLOW_ADMIN_PASSWORD:-MLflowAdmin777}
+      SPARK_MASTER_URL: spark://spark-master:7077
+      TRINO_HOST: trino
+      TRINO_PORT: "8080"
+    command: ["python", "/workspace/bootstrap/seed_demo.py", "--step", "post_dbt"]
+    volumes:
+      - ./:/workspace
+      - ./spark/conf/spark-defaults.conf:/workspace/bootstrap/spark-defaults.conf:ro
+    restart: "no"
+
+  feast-bootstrap:
+    build:
+      context: ./feast
+      dockerfile: Dockerfile
+    platform: linux/amd64
+    container_name: feast-bootstrap
+    depends_on:
+      platform-bootstrap:
+        condition: service_completed_successfully
+      postgres-feast:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    working_dir: /opt/feast/project
+    command:
+      [
+        "sh",
+        "-c",
+        "feast -c /opt/feast/project apply && feast -c /opt/feast/project materialize-incremental $(date -u +%Y-%m-%dT%H:%M:%S)"
+      ]
+    environment:
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_S3_ENDPOINT_URL: http://minio:9000
+      FEAST_DB_PASSWORD: ${FEAST_DB_PASSWORD}
+      FEAST_REGISTRY_DB_URL: postgresql://feast:${FEAST_DB_PASSWORD}@postgres-feast:5432/feast
+    volumes:
+      - ./feast/project:/opt/feast/project
+    restart: "no"
+
+  quality-bootstrap:
+    build:
+      context: ./quality
+      dockerfile: Dockerfile
+    platform: linux/amd64
+    container_name: quality-bootstrap
+    depends_on:
+      platform-bootstrap:
+        condition: service_completed_successfully
+      trino:
+        condition: service_healthy
+    working_dir: /workspace
+    command: ["python", "/workspace/quality/generate_quality_assets.py"]
+    volumes:
+      - ./:/workspace
+    restart: "no"
+
   mlserver:
-    image: seldonio/mlserver:1.6.0
+    build:
+      context: ./mlserver
+      dockerfile: Dockerfile
     platform: linux/amd64
     container_name: mlserver
+    depends_on:
+      platform-bootstrap:
+        condition: service_completed_successfully
     ports:
       - "8085:8080"
       - "8086:8081"
@@ -399,15 +723,13 @@ services:
       MLSERVER_PARALLEL_WORKERS: "1"
       AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
     volumes:
       - ./mlserver/models:/opt/mlserver/models
       - ./mlserver/settings.json:/opt/mlserver/settings.json:ro
     restart: unless-stopped
 
-  # ────────────────────────────────────────────────────────────
-  #  10. CloudBeaver  —  web SQL client (query your Postgres DBs)
-  #     UI: http://localhost:8978
-  # ────────────────────────────────────────────────────────────
   cloudbeaver:
     image: dbeaver/cloudbeaver:24.1.0
     platform: linux/amd64
@@ -420,12 +742,16 @@ services:
 
 volumes:
   minio_data:
+  demo_postgres_data:
   postgres_airflow_data:
   postgres_feast_data:
   postgres_mlflow_data:
+  postgres_iceberg_data:
   postgres_jupyterhub_data:
+  postgres_superset_data:
   jupyterhub_data:
   cloudbeaver_data:
+  grafana_data:
 
 networks:
   default:

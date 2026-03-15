@@ -4,7 +4,7 @@ provider: local
 # Registry stored in Postgres (survives container restarts)
 registry:
   registry_type: sql
-  path: postgresql://feast:${FEAST_DB_PASSWORD}@postgres-feast:5432/feast
+  path: postgresql+psycopg://feast:${FEAST_DB_PASSWORD}@postgres-feast:5432/feast
   cache_ttl_seconds: 60
 
 # Offline store: reads Parquet files from MinIO via S3
