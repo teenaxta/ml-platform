@@ -179,24 +179,6 @@ services:
       - ./spark/conf/spark-defaults.conf:/opt/bitnami/spark/conf/spark-defaults.conf:ro
     restart: unless-stopped
 
-  demo-postgres:
-    image: postgres:15
-    platform: linux/amd64
-    container_name: demo-postgres
-    environment:
-      POSTGRES_DB: retail_db
-      POSTGRES_USER: analyst
-      POSTGRES_PASSWORD: analyst123
-    ports:
-      - "5433:5432"
-    volumes:
-      - demo_postgres_data:/var/lib/postgresql/data
-      - ./demo-postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
-    healthcheck:
-      test: ["CMD", "pg_isready", "-U", "analyst", "-d", "retail_db"]
-      interval: 10s
-      retries: 5
-    restart: unless-stopped
 
   jupyterhub:
     build:
@@ -207,7 +189,6 @@ services:
       - spark-master
       - iceberg-rest
       - postgres-jupyterhub
-      - demo-postgres
       - trino
     ports:
       - "8888:8000"
@@ -481,8 +462,6 @@ services:
     container_name: trino
     user: "0:0"
     depends_on:
-      demo-postgres:
-        condition: service_healthy
       postgres-iceberg:
         condition: service_healthy
     ports:
@@ -499,17 +478,6 @@ services:
       retries: 10
     restart: unless-stopped
 
-  postgres-exporter-demo:
-    image: prometheuscommunity/postgres-exporter:v0.15.0
-    platform: linux/amd64
-    container_name: postgres-exporter-demo
-    depends_on:
-      demo-postgres:
-        condition: service_healthy
-    environment:
-      DATA_SOURCE_NAME: postgresql://analyst:analyst123@demo-postgres:5432/retail_db?sslmode=disable
-    restart: unless-stopped
-
   prometheus:
     image: prom/prometheus:v2.53.1
     platform: linux/amd64
@@ -518,8 +486,6 @@ services:
       - "9090:9090"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-    depends_on:
-      - postgres-exporter-demo
     restart: unless-stopped
 
   grafana:
@@ -559,41 +525,6 @@ services:
       - ./evidently/reports:/usr/share/nginx/html:ro
     restart: unless-stopped
 
-  raw-bootstrap:
-    build:
-      context: ./bootstrap
-      dockerfile: Dockerfile
-    platform: linux/amd64
-    container_name: raw-bootstrap
-    depends_on:
-      minio-init:
-        condition: service_completed_successfully
-      demo-postgres:
-        condition: service_healthy
-      spark-master:
-        condition: service_started
-      trino:
-        condition: service_healthy
-    working_dir: /workspace
-    environment:
-      ROOT_DIR: /workspace
-      JAVA_HOME: /usr/lib/jvm/default-java
-      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
-      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
-      AWS_REGION: us-east-1
-      AWS_DEFAULT_REGION: us-east-1
-      ICEBERG_JDBC_URI: jdbc:postgresql://postgres-iceberg:5432/iceberg_catalog
-      ICEBERG_JDBC_USER: iceberg
-      ICEBERG_JDBC_PASSWORD: iceberg123
-      SPARK_MASTER_URL: spark://spark-master:7077
-      TRINO_HOST: trino
-      TRINO_PORT: "8080"
-    command: ["python", "/workspace/bootstrap/seed_demo.py", "--step", "ingest_raw"]
-    volumes:
-      - ./:/workspace
-      - ./spark/conf/spark-defaults.conf:/workspace/bootstrap/spark-defaults.conf:ro
-    restart: "no"
-
   dbt-bootstrap:
     build:
       context: ./dbt
@@ -601,8 +532,6 @@ services:
     platform: linux/amd64
     container_name: dbt-bootstrap
     depends_on:
-      raw-bootstrap:
-        condition: service_completed_successfully
       trino:
         condition: service_healthy
     working_dir: /opt/dbt
@@ -742,7 +671,6 @@ services:
 
 volumes:
   minio_data:
-  demo_postgres_data:
   postgres_airflow_data:
   postgres_feast_data:
   postgres_mlflow_data:

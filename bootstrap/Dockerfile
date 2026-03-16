@@ -12,7 +12,7 @@ RUN pip install --no-cache-dir \
     psycopg2-binary \
     pyarrow \
     pyspark==3.5.1 \
-    scikit-learn==1.5.2 \
+    requests \
     trino
 
 ENV JAVA_HOME=/usr/lib/jvm/default-java

@@ -1,8 +1,8 @@
 {
   "name": "churn-model",
-  "implementation": "mlserver_sklearn.SKLearnModel",
+  "implementation": "mlserver_mlflow.MLflowRuntime",
   "parameters": {
-    "uri": "./model.joblib",
+    "uri": "./mlflow_model",
     "version": "v1"
   }
 }

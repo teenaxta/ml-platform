@@ -13,9 +13,70 @@ python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().
 python3 -c "import secrets; print(secrets.token_hex(32))"
 ```
 
-Use the first value for `AIRFLOW_FERNET_KEY` and the second one for `MLFLOW_FLASK_SECRET_KEY` and `SUPERSET_SECRET_KEY`.
+Use the first value for `AIRFLOW_FERNET_KEY` and the second for `MLFLOW_FLASK_SECRET_KEY` and `SUPERSET_SECRET_KEY`.
 
-## 2. Build the custom images
+---
+
+## 2. Create the shared Docker network
+
+All compose files share a single Docker network. Create it once before starting anything:
+
+```bash
+docker network create mlplatform 2>/dev/null || true
+```
+
+---
+
+## 3. Start the source database
+
+The demo PostgreSQL database runs in its own compose file so it can be started and stopped independently of the main platform.
+
+```bash
+docker compose -f docker-compose.demo-postgres.yml up -d
+```
+
+Verify it is healthy:
+
+```bash
+docker compose -f docker-compose.demo-postgres.yml ps
+```
+
+The `demo-postgres` container should show `healthy`.
+
+---
+
+## 4. Install and start Airbyte
+
+Airbyte is the data ingestion layer. It replaced the old `raw-bootstrap` job and syncs source tables from `demo-postgres` into the Iceberg lakehouse.
+
+> **Why not a docker-compose file?** Airbyte deprecated Docker Compose after v1.0 (August 2024). The official self-hosted method is `abctl`, which uses a local Kubernetes cluster under the hood.
+
+Install `abctl` (macOS):
+
+```bash
+brew tap airbytehq/tap
+brew install abctl
+```
+
+Install `abctl` (Linux):
+
+```bash
+curl -LsfS https://get.airbyte.com | bash -
+```
+
+Start Airbyte:
+
+```bash
+abctl local install
+```
+
+This takes 3–10 minutes on first run. When complete, Airbyte is available at `http://localhost:8000` (username `airbyte`, password `password`).
+
+For full configuration instructions (PostgreSQL source, Iceberg/MinIO destination, running the first sync), follow [workshop/antigravity/AIRBYTE_SETUP.md](workshop/antigravity/AIRBYTE_SETUP.md).
+
+---
+
+## 5. Build the custom images
 
 ```bash
 docker compose build
@@ -23,62 +84,85 @@ docker compose build
 
 This builds the custom images for Airflow, dbt, JupyterHub, MLflow, MLServer, Superset, Feast, and the bootstrap job.
 
-## 3. Start the full stack
+---
+
+## 6. Start the main platform
 
 ```bash
 docker compose up -d
-docker compose logs -f --tail=50 raw-bootstrap dbt-bootstrap platform-bootstrap feast-bootstrap quality-bootstrap
+docker compose logs -f --tail=50 dbt-bootstrap platform-bootstrap feast-bootstrap quality-bootstrap
 ```
 
-Wait for the one-shot bootstrap jobs to exit successfully. Together they do the initial learning setup:
+Wait for the one-shot bootstrap jobs to exit successfully. Together they:
 
-- ingests raw tables from demo Postgres into Iceberg
-- runs dbt models and tests through Trino
-- generates dbt docs
-- writes Feast offline feature files and materializes them
-- builds Great Expectations Data Docs
-- trains a churn model, logs a demo run to MLflow, and writes an MLServer model bundle
-- creates an Evidently drift report
+- Run dbt models and tests through Trino
+- Generate dbt docs
+- Use PySpark to read Iceberg marts and write Feast offline feature files to MinIO
+- Train a churn model with PySpark MLlib, log the run to MLflow, and write the MLflow Spark model bundle for MLServer
+- Materialize Feast features into the online store (Postgres)
+- Build Great Expectations Data Docs
+- Create an Evidently drift report
 
-If `raw-bootstrap` fails, inspect its logs first. On smaller Docker Desktop allocations the bootstrap jobs can still fail because the Python, JVM, and query workload does not have enough memory. If you see memory-related failures, raise Docker memory and retry `docker compose up -d`.
+> **Note**: `platform-bootstrap` requires that Airbyte has already synced raw data into Iceberg (`iceberg.retail_raw.*`). Run an Airbyte sync from the UI (step 4) before starting the platform, or the `dbt-bootstrap` step will fail because the source tables do not exist yet.
 
-## 4. Open the UIs
+If bootstrap jobs fail due to memory pressure, raise Docker Desktop memory and retry `docker compose up -d`.
+
+---
+
+## 7. Open the UIs
 
 See [docs/ACCESS_AND_URLS.md](docs/ACCESS_AND_URLS.md) for the complete list.
 
 The main starting points are:
 
-- JupyterHub: `http://localhost:8888`
-- Airflow: `http://localhost:8082`
-- Superset: `http://localhost:8088`
-- MLflow: `http://localhost:5000`
-- Grafana: `http://localhost:3000`
-- Great Expectations docs: `http://localhost:8091`
-- Evidently report: `http://localhost:8092`
+| UI | URL | Notes |
+|---|---|---|
+| Airbyte | `http://localhost:8000` | Configure ingestion syncs |
+| JupyterHub | `http://localhost:8888` | PySpark notebooks, feature exploration |
+| Airflow | `http://localhost:8082` | Pipeline orchestration |
+| Superset | `http://localhost:8088` | BI dashboards over Trino |
+| MLflow | `http://localhost:5000` | Experiment tracking, PySpark MLlib models |
+| Grafana | `http://localhost:3000` | Ops dashboards |
+| Spark Master UI | `http://localhost:8080` | Monitor Spark jobs |
+| Great Expectations | `http://localhost:8091` | Data quality reports |
+| Evidently | `http://localhost:8092` | Drift reports |
 
-## 5. Follow the practice flow
+---
 
-Open [docs/PRACTICE_LAB.md](docs/PRACTICE_LAB.md). It walks through the stack as a learner:
+## 8. Follow the practice flow
 
-1. read the shared foundations guide
-2. choose the production-style or simpler repository-native lab
-3. connect to a PostgreSQL source
-4. inspect lakehouse ingestion and transformation outputs
-5. validate data with dbt, Great Expectations, and the dbt docs site
-6. inspect features in Feast
-7. inspect training and experiment tracking in MLflow
-8. inspect model serving through MLServer
-9. inspect monitoring outputs in Evidently, Grafana, and Prometheus
-10. use JupyterHub, Superset, CloudBeaver, and Trino as supported access layers
+Open the workshop documents in `workshop/antigravity/`:
 
-If you want repeatable notebook defaults, shared Spark settings, or VS Code connectivity, also read [docs/JUPYTERHUB_GUIDE.md](docs/JUPYTERHUB_GUIDE.md).
+1. Read [00_SHARED_FOUNDATIONS.md](workshop/antigravity/00_SHARED_FOUNDATIONS.md) — architecture, startup order, service map
+2. Set up Airbyte: follow [AIRBYTE_SETUP.md](workshop/antigravity/AIRBYTE_SETUP.md)
+3. Choose your lab:
+   - [01_LAB_PRODUCTION.md](workshop/antigravity/01_LAB_PRODUCTION.md) — production-style, build everything manually
+   - [02_LAB_SIMPLE.md](workshop/antigravity/02_LAB_SIMPLE.md) — repository-native, use existing scripts
+
+---
 
 ## Useful commands
 
 ```bash
+# Status
 docker compose ps
-docker compose logs -f superset
-docker compose logs -f trino
+docker compose -f docker-compose.demo-postgres.yml ps
+abctl local status
+
+# Logs
 docker compose logs -f airflow-webserver
+docker compose logs -f trino
+docker compose logs -f spark-master
+docker compose logs -f jupyterhub
+
+# Restart a service
+docker compose restart mlserver
+
+# Full teardown (keeps volumes)
 docker compose down
+docker compose -f docker-compose.demo-postgres.yml down
+
+# Full teardown including volumes
+docker compose down -v
+docker compose -f docker-compose.demo-postgres.yml down -v
 ```

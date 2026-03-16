@@ -1,23 +1,11 @@
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse
-
-import mlflow
-import pandas as pd
-import pyarrow as pa
-import pyarrow.fs as pa_fs
-import pyarrow.parquet as pq
-import trino
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score, f1_score
-from sklearn.model_selection import train_test_split
 
 
 ROOT_DIR = Path(os.environ.get("ROOT_DIR", Path(__file__).resolve().parents[1]))
@@ -26,15 +14,27 @@ DBT_PROJECT = DBT_ROOT / "retail"
 MLSERVER_MODEL_DIR = ROOT_DIR / "mlserver" / "models" / "churn-model"
 TRINO_HOST = os.environ.get("TRINO_HOST", "trino")
 TRINO_PORT = int(os.environ.get("TRINO_PORT", "8080"))
-TRINO_ICEBERG_CATALOG = "iceberg"
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
-S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "http://minio:9000")
+S3_ENDPOINT = os.environ.get("MLFLOW_S3_ENDPOINT_URL", os.environ.get("S3_ENDPOINT", "http://minio:9000"))
+SPARK_MASTER_URL = os.environ.get("SPARK_MASTER_URL", "spark://spark-master:7077")
 ICEBERG_JDBC_URI = os.environ.get(
     "ICEBERG_JDBC_URI",
     "jdbc:postgresql://postgres-iceberg:5432/iceberg_catalog",
 )
 ICEBERG_JDBC_USER = os.environ.get("ICEBERG_JDBC_USER", "iceberg")
 ICEBERG_JDBC_PASSWORD = os.environ.get("ICEBERG_JDBC_PASSWORD", "iceberg123")
+
+
+FEATURE_COLUMNS = [
+    "age",
+    "total_orders",
+    "lifetime_value",
+    "avg_order_value",
+    "days_since_last_order",
+    "page_views_30d",
+    "support_tickets",
+    "return_rate",
+]
 
 
 def log(message: str) -> None:
@@ -45,143 +45,73 @@ def wait_for_http(url: str, attempts: int = 40, delay: int = 5) -> None:
     import requests
 
     for _ in range(attempts):
-      try:
-          response = requests.get(url, timeout=5)
-          if response.status_code < 500:
-              return
-      except Exception:
-          pass
-      time.sleep(delay)
-    raise RuntimeError(f"Timed out waiting for {url}")
-
-
-def wait_for_file(path: Path, attempts: int = 20, delay: int = 2) -> None:
-    for _ in range(attempts):
-        if path.exists():
-            return
-        time.sleep(delay)
-    raise RuntimeError(f"Timed out waiting for {path}")
-
-
-def trino_connection() -> trino.dbapi.Connection:
-    return trino.dbapi.connect(
-        host=TRINO_HOST,
-        port=TRINO_PORT,
-        user="trino",
-        catalog="iceberg",
-        schema="analytics",
-    )
-
-
-def trino_query(sql: str) -> pd.DataFrame:
-    conn = trino_connection()
-    cur = conn.cursor()
-    cur.execute(sql)
-    rows = cur.fetchall()
-    columns = [col[0] for col in cur.description]
-    return pd.DataFrame(rows, columns=columns)
-
-
-def trino_execute(sql: str) -> None:
-    conn = trino_connection()
-    cur = conn.cursor()
-    cur.execute(sql)
-
-
-def s3_filesystem() -> pa_fs.S3FileSystem:
-    parsed = urlparse(S3_ENDPOINT)
-    return pa_fs.S3FileSystem(
-        access_key=os.environ["AWS_ACCESS_KEY_ID"],
-        secret_key=os.environ["AWS_SECRET_ACCESS_KEY"],
-        region=AWS_REGION,
-        scheme=parsed.scheme or "http",
-        endpoint_override=parsed.netloc or parsed.path,
-    )
-
-
-def parse_s3_uri(uri: str) -> tuple[str, str]:
-    parsed = urlparse(uri)
-    if parsed.scheme != "s3":
-        raise ValueError(f"Expected s3:// URI, got {uri}")
-    return parsed.netloc, parsed.path.lstrip("/").rstrip("/")
-
-
-def write_parquet_to_s3(df: pd.DataFrame, uri: str) -> None:
-    bucket, prefix = parse_s3_uri(uri)
-    dataset_path = f"{bucket}/{prefix}"
-    fs = s3_filesystem()
-    fs.delete_dir_contents(dataset_path, missing_dir_ok=True)
-    fs.create_dir(dataset_path, recursive=True)
-    table = pa.Table.from_pandas(df, preserve_index=False)
-    with fs.open_output_stream(f"{dataset_path}/part-00000.parquet") as sink:
-        pq.write_table(table, sink)
-
-
-def wait_for_trino_schema(schema: str, attempts: int = 24, delay: int = 5) -> None:
-    for _ in range(attempts):
         try:
-            schemas = trino_query("SELECT schema_name FROM iceberg.information_schema.schemata")
-            if schema in schemas["schema_name"].tolist():
+            response = requests.get(url, timeout=5)
+            if response.status_code < 500:
                 return
         except Exception:
             pass
         time.sleep(delay)
-    raise RuntimeError(f"Timed out waiting for Trino schema {schema}")
+    raise RuntimeError(f"Timed out waiting for {url}")
 
 
-def ensure_seed_dirs() -> None:
-    for path in [MLSERVER_MODEL_DIR, DBT_PROJECT / "target", ROOT_DIR / "evidently"]:
-        path.mkdir(parents=True, exist_ok=True)
+def get_spark():
+    """Create a SparkSession configured for Iceberg + MinIO."""
+    from pyspark.sql import SparkSession
 
+    aws_access_key = os.environ["AWS_ACCESS_KEY_ID"]
+    aws_secret_key = os.environ["AWS_SECRET_ACCESS_KEY"]
 
-def ingest_raw() -> None:
-    wait_for_http("http://trino:8080/v1/info", attempts=24, delay=5)
-    trino_execute(f"CREATE SCHEMA IF NOT EXISTS {TRINO_ICEBERG_CATALOG}.retail_raw")
-    trino_execute(f"CREATE SCHEMA IF NOT EXISTS {TRINO_ICEBERG_CATALOG}.analytics")
-    source_queries = {
-        "events": """
-            SELECT
-              event_id,
-              customer_id,
-              event_type,
-              event_ts,
-              json_format(metadata) AS metadata
-            FROM postgresql.public.events
-        """
-    }
-    tables = [
-        "customers",
-        "products",
-        "orders",
-        "order_items",
-        "events",
-        "payments",
-        "shipments",
-        "support_tickets",
-    ]
-    for table in tables:
-        trino_execute(f"DROP TABLE IF EXISTS {TRINO_ICEBERG_CATALOG}.retail_raw.{table}")
-        source_query = source_queries.get(table, f"SELECT * FROM postgresql.public.{table}")
-        trino_execute(
-            f"""
-            CREATE TABLE {TRINO_ICEBERG_CATALOG}.retail_raw.{table} AS
-            {source_query}
-            """
+    PACKAGES = ",".join([
+        "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.5.2",
+        "org.apache.iceberg:iceberg-aws-bundle:1.5.2",
+        "software.amazon.awssdk:url-connection-client:2.25.53",
+        "org.apache.hadoop:hadoop-aws:3.3.4",
+        "com.amazonaws:aws-java-sdk-bundle:1.12.262",
+        "org.postgresql:postgresql:42.7.3",
+    ])
+
+    return (
+        SparkSession.builder
+        .appName("RetailPlatformBootstrap")
+        .master(SPARK_MASTER_URL)
+        .config("spark.jars.packages", PACKAGES)
+        .config(
+            "spark.sql.extensions",
+            "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
         )
-        row_count = int(
-            trino_query(
-                f"SELECT COUNT(*) AS row_count FROM {TRINO_ICEBERG_CATALOG}.retail_raw.{table}"
-            )["row_count"].iloc[0]
+        .config("spark.sql.catalog.warehouse", "org.apache.iceberg.spark.SparkCatalog")
+        .config("spark.sql.catalog.warehouse.type", "jdbc")
+        .config("spark.sql.catalog.warehouse.uri", ICEBERG_JDBC_URI)
+        .config("spark.sql.catalog.warehouse.jdbc.user", ICEBERG_JDBC_USER)
+        .config("spark.sql.catalog.warehouse.jdbc.password", ICEBERG_JDBC_PASSWORD)
+        .config("spark.sql.catalog.warehouse.jdbc.schema-version", "V1")
+        .config("spark.sql.catalog.warehouse.warehouse", "s3://warehouse/")
+        .config("spark.sql.catalog.warehouse.io-impl", "org.apache.iceberg.aws.s3.S3FileIO")
+        .config("spark.sql.catalog.warehouse.http-client.type", "urlconnection")
+        .config("spark.sql.catalog.warehouse.client.region", AWS_REGION)
+        .config("spark.sql.catalog.warehouse.s3.endpoint", S3_ENDPOINT)
+        .config("spark.sql.catalog.warehouse.s3.path-style-access", "true")
+        .config("spark.sql.catalog.warehouse.s3.access-key-id", aws_access_key)
+        .config("spark.sql.catalog.warehouse.s3.secret-access-key", aws_secret_key)
+        .config("spark.hadoop.fs.s3a.endpoint", S3_ENDPOINT)
+        .config("spark.hadoop.fs.s3a.path.style.access", "true")
+        .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
+        .config(
+            "spark.hadoop.fs.s3a.aws.credentials.provider",
+            "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider",
         )
-        log(f"Loaded {table}: {row_count} rows")
-    wait_for_trino_schema("retail_raw")
-    wait_for_trino_schema("analytics")
-    log("Verified retail_raw and analytics schemas are visible in Trino.")
+        .config("spark.hadoop.fs.s3a.access.key", aws_access_key)
+        .config("spark.hadoop.fs.s3a.secret.key", aws_secret_key)
+        .getOrCreate()
+    )
 
 
-def publish_feast_sources() -> None:
-    customer_stats = trino_query(
-        """
+def publish_feast_sources(spark) -> None:
+    """Read analytics marts from Iceberg via Spark and write Parquet to MinIO for Feast."""
+    log("Publishing Feast feature sources via Spark...")
+
+    customer_stats = spark.sql("""
         SELECT
           customer_id,
           age,
@@ -192,13 +122,12 @@ def publish_feast_sources() -> None:
           days_since_last_order,
           avg_order_value,
           event_timestamp
-        FROM iceberg.analytics.customer_360
-        """
-    )
-    write_parquet_to_s3(customer_stats, "s3://warehouse/feast/customer_stats/")
+        FROM warehouse.analytics.customer_360
+    """)
+    customer_stats.write.mode("overwrite").parquet("s3a://warehouse/feast/customer_stats/")
+    log(f"  customer_stats: {customer_stats.count()} rows")
 
-    customer_behavior = trino_query(
-        """
+    customer_behavior = spark.sql("""
         SELECT
           customer_id,
           page_views_30d,
@@ -206,13 +135,12 @@ def publish_feast_sources() -> None:
           support_tickets,
           checkout_rate,
           event_timestamp
-        FROM iceberg.analytics.customer_behavior
-        """
-    )
-    write_parquet_to_s3(customer_behavior, "s3://warehouse/feast/customer_behavior/")
+        FROM warehouse.analytics.customer_behavior
+    """)
+    customer_behavior.write.mode("overwrite").parquet("s3a://warehouse/feast/customer_behavior/")
+    log(f"  customer_behavior: {customer_behavior.count()} rows")
 
-    product_stats = trino_query(
-        """
+    product_stats = spark.sql("""
         SELECT
           product_id,
           category,
@@ -222,77 +150,105 @@ def publish_feast_sources() -> None:
           revenue,
           stock_qty,
           event_timestamp
-        FROM iceberg.analytics.product_performance
-        """
-    )
-    write_parquet_to_s3(product_stats, "s3://warehouse/feast/product_stats/")
+        FROM warehouse.analytics.product_performance
+    """)
+    product_stats.write.mode("overwrite").parquet("s3a://warehouse/feast/product_stats/")
+    log(f"  product_stats: {product_stats.count()} rows")
+
+    log("Feast feature sources published.")
 
 
-def train_and_log_model() -> pd.DataFrame:
-    dataset = trino_query(
-        """
+def train_and_log_model(spark) -> None:
+    """Train a churn model with PySpark MLlib, log to MLflow, and save for MLServer."""
+    import mlflow
+    import mlflow.spark
+
+    from pyspark.ml import Pipeline
+    from pyspark.ml.classification import RandomForestClassifier
+    from pyspark.ml.evaluation import BinaryClassificationEvaluator, MulticlassClassificationEvaluator
+    from pyspark.ml.feature import VectorAssembler
+    from pyspark.sql.functions import col
+
+    log("Loading churn training dataset from Iceberg...")
+    dataset = spark.sql("""
         SELECT *
-        FROM iceberg.analytics.churn_training_dataset
+        FROM warehouse.analytics.churn_training_dataset
         ORDER BY customer_id
-        """
-    )
-    feature_columns = [
-        "age",
-        "total_orders",
-        "lifetime_value",
-        "avg_order_value",
-        "days_since_last_order",
-        "page_views_30d",
-        "support_tickets",
-        "return_rate",
-    ]
-    X = dataset[feature_columns]
-    y = dataset["churn_label"]
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.3, random_state=42, stratify=y
-    )
+    """)
 
-    model = RandomForestClassifier(n_estimators=50, random_state=42)
-    model.fit(X_train, y_train)
-    predictions = model.predict(X_test)
-    accuracy = float(accuracy_score(y_test, predictions))
-    f1 = float(f1_score(y_test, predictions))
+    for feature_col in FEATURE_COLUMNS:
+        dataset = dataset.withColumn(feature_col, col(feature_col).cast("double"))
+    dataset = dataset.withColumn("churn_label", col("churn_label").cast("double"))
+
+    train_df, test_df = dataset.randomSplit([0.7, 0.3], seed=42)
+    log(f"  Train: {train_df.count()} rows, Test: {test_df.count()} rows")
+
+    assembler = VectorAssembler(inputCols=FEATURE_COLUMNS, outputCol="features")
+    rf = RandomForestClassifier(
+        featuresCol="features",
+        labelCol="churn_label",
+        numTrees=50,
+        seed=42,
+    )
+    pipeline = Pipeline(stages=[assembler, rf])
+
+    log("Training PySpark MLlib RandomForestClassifier pipeline...")
+    model = pipeline.fit(train_df)
+
+    predictions = model.transform(test_df)
+
+    acc_evaluator = MulticlassClassificationEvaluator(
+        labelCol="churn_label", predictionCol="prediction", metricName="accuracy"
+    )
+    auc_evaluator = BinaryClassificationEvaluator(
+        labelCol="churn_label", rawPredictionCol="rawPrediction", metricName="areaUnderROC"
+    )
+    accuracy = float(acc_evaluator.evaluate(predictions))
+    auc = float(auc_evaluator.evaluate(predictions))
+    log(f"  Accuracy: {accuracy:.4f}, AUC: {auc:.4f}")
 
     mlflow.set_tracking_uri(os.environ["MLFLOW_TRACKING_URI"])
     mlflow.set_experiment("retail-churn-demo")
-    with mlflow.start_run(run_name="bootstrap-random-forest"):
-        mlflow.log_params({"model_type": "RandomForestClassifier", "n_estimators": 50})
-        mlflow.log_metrics({"accuracy": accuracy, "f1_score": f1})
-        mlflow.set_tags({"demo_model_path": "mlserver/models/churn-model/model.joblib"})
 
-    MLSERVER_MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    model_path = MLSERVER_MODEL_DIR / "model.joblib"
-    with model_path.open("wb") as handle:
-        import joblib
+    with mlflow.start_run(run_name="bootstrap-pyspark-random-forest"):
+        mlflow.log_params({
+            "model_type": "PySpark_RandomForestClassifier",
+            "num_trees": 50,
+            "framework": "pyspark.ml",
+        })
+        mlflow.log_metrics({"accuracy": accuracy, "auc": auc})
+        mlflow.set_tags({
+            "demo_model_path": "mlserver/models/churn-model/mlflow_model",
+            "training_framework": "PySpark MLlib",
+        })
 
-        joblib.dump(model, handle)
+        mlflow_model_path = MLSERVER_MODEL_DIR / "mlflow_model"
+        mlflow_model_path.mkdir(parents=True, exist_ok=True)
+        mlflow.spark.save_model(model, str(mlflow_model_path))
+        log(f"  MLflow Spark model saved to {mlflow_model_path}")
 
     model_settings = {
         "name": "churn-model",
-        "implementation": "mlserver_sklearn.SKLearnModel",
-        "parameters": {"uri": "./model.joblib", "version": "v1"},
+        "implementation": "mlserver_mlflow.MLflowRuntime",
+        "parameters": {"uri": "./mlflow_model", "version": "v1"},
     }
     (MLSERVER_MODEL_DIR / "model-settings.json").write_text(
         json.dumps(model_settings, indent=2),
         encoding="utf-8",
     )
 
-    scored = dataset.copy()
-    scored["prediction"] = model.predict(X)
-    probabilities = model.predict_proba(X)
-    if len(model.classes_) == 1:
-        positive_class_probability = 1.0 if int(model.classes_[0]) == 1 else 0.0
-        scored["prediction_probability"] = positive_class_probability
-    else:
-        positive_class_index = list(model.classes_).index(1)
-        scored["prediction_probability"] = probabilities[:, positive_class_index]
-    scored.to_csv(ROOT_DIR / "evidently" / "scored_dataset.csv", index=False)
-    return scored
+    all_predictions = model.transform(dataset)
+    scored_pd = all_predictions.select(
+        *FEATURE_COLUMNS,
+        "churn_label",
+        "prediction",
+        "probability",
+    ).toPandas()
+
+    scored_pd["prediction_probability"] = scored_pd["probability"].apply(lambda v: float(v[1]))
+    scored_pd = scored_pd.drop(columns=["probability"])
+    scored_pd.to_csv(ROOT_DIR / "evidently" / "scored_dataset.csv", index=False)
+    log("  Scored dataset written for Evidently.")
 
 
 def write_seed_manifest() -> None:
@@ -301,38 +257,50 @@ def write_seed_manifest() -> None:
         "dbt_docs": "dbt/retail/target/index.html",
         "great_expectations_docs": "great_expectations/uncommitted/data_docs/local_site/index.html",
         "evidently_report": "evidently/reports/index.html",
-        "mlserver_model": "mlserver/models/churn-model/model.joblib",
+        "mlserver_model": "mlserver/models/churn-model/mlflow_model",
     }
     (ROOT_DIR / "bootstrap" / "seed_manifest.json").write_text(
-        __import__("json").dumps(manifest, indent=2),
+        json.dumps(manifest, indent=2),
         encoding="utf-8",
     )
+
+
+def ensure_seed_dirs() -> None:
+    for path in [MLSERVER_MODEL_DIR, DBT_PROJECT / "target", ROOT_DIR / "evidently"]:
+        path.mkdir(parents=True, exist_ok=True)
 
 
 def run_post_dbt() -> None:
     ensure_seed_dirs()
     wait_for_http("http://trino:8080/v1/info")
     wait_for_http("http://mlflow:5000")
-    publish_feast_sources()
-    train_and_log_model()
+
+    log("Creating Spark session...")
+    spark = get_spark()
+    try:
+        publish_feast_sources(spark)
+        train_and_log_model(spark)
+    finally:
+        spark.stop()
+        log("Spark session stopped.")
+
     write_seed_manifest()
     log("Post-dbt bootstrap complete.")
 
 
-def run_ingest() -> None:
-    ensure_seed_dirs()
-    ingest_raw()
-    log("Raw ingest complete.")
-
-
 def main() -> None:
+    import argparse
+
     parser = argparse.ArgumentParser()
-    parser.add_argument("--step", choices=["ingest_raw", "post_dbt"], required=True)
+    parser.add_argument(
+        "--step",
+        choices=["post_dbt"],
+        required=True,
+        help="post_dbt: publish Feast sources and train model (Airbyte handles raw ingestion)",
+    )
     args = parser.parse_args()
 
-    if args.step == "ingest_raw":
-        run_ingest()
-    elif args.step == "post_dbt":
+    if args.step == "post_dbt":
         run_post_dbt()
     else:
         parser.print_help()

@@ -1,12 +1,16 @@
-# Optional standalone source database.
+# Standalone source database.
 #
-# The main `docker-compose.yml` already includes `demo-postgres`.
-# Keep this file only if you want to run the source database by itself
-# against the shared `mlplatform` Docker network.
+# This simulates an external production database that Airbyte ingests from.
+# It runs on the shared `mlplatform` Docker network so platform services
+# (Trino, Airbyte, CloudBeaver) can reach it at host `demo-postgres`.
+#
+# Start BEFORE the main platform:
+#   docker compose -f docker-compose.demo-postgres.yml up -d
 
 services:
   demo-postgres:
     image: postgres:15
+    platform: linux/amd64
     container_name: demo-postgres
     environment:
       POSTGRES_DB: retail_db
@@ -20,13 +24,27 @@ services:
     networks:
       - mlplatform
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "analyst", "-d", "retail_db"]
+      test: [ "CMD", "pg_isready", "-U", "analyst", "-d", "retail_db" ]
       interval: 10s
       retries: 5
     restart: unless-stopped
 
+  postgres-exporter-demo:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    platform: linux/amd64
+    container_name: postgres-exporter-demo
+    depends_on:
+      demo-postgres:
+        condition: service_healthy
+    environment:
+      DATA_SOURCE_NAME: postgresql://analyst:analyst123@demo-postgres:5432/retail_db?sslmode=disable
+    networks:
+      - mlplatform
+    restart: unless-stopped
+
 volumes:
   demo_postgres_data:
+
 
 networks:
   mlplatform:
