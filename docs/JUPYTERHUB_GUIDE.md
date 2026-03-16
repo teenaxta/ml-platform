@@ -1,150 +1,407 @@
-# JupyterHub Guide
+# JupyterHub Environment Guide
 
-This guide explains how to make the JupyterHub setup repeatable for every developer instead of asking each person to re-enter Spark, Trino, MLflow, or source database settings in every notebook.
+This document focuses on JupyterHub as a user environment, not as a place to hardcode one fixed database target.
 
-## How the environment should be split
+The main purpose is to explain:
 
-Use these layers on purpose:
+- how user environments are configured
+- how Spark-related settings should be managed
+- how packages should be managed
+- how resource usage should be controlled
+- how users should work safely and predictably inside their notebook environments
 
-- `docker-compose.yml` -> define the shared service endpoints, credentials, and runtime defaults for the `jupyterhub` container
-- `jupyterhub/jupyterhub_config.py` -> forward those values into every spawned user server through `c.Spawner.environment`
-- `spark/conf/spark-defaults.conf` -> keep cluster-wide Spark defaults here when they should apply to all Spark jobs
-- notebook code -> read from environment variables and only keep true notebook logic in the file
-- `jupyterhub/Dockerfile` -> add Python packages or system packages that every user should have
+## 1. What JupyterHub is doing in this platform
 
-That split gives you one place for platform defaults and keeps notebooks portable.
+JupyterHub provides a managed notebook workspace for users who need to:
 
-## What is already centralized in this repo
+- inspect data
+- prototype transformations
+- test ML ideas
+- connect to Spark, Trino, MLflow, and source systems
 
-The JupyterHub service now passes these defaults into user sessions:
+It is a workspace layer, not the source of truth for production deployment.
 
-- Spark master: `SPARK_MASTER`
-- Trino connection: `TRINO_HOST`, `TRINO_PORT`, `TRINO_USER`, `TRINO_CATALOG`, `TRINO_SCHEMA`
-- MLflow connection: `MLFLOW_TRACKING_URI`, `MLFLOW_TRACKING_USERNAME`, `MLFLOW_TRACKING_PASSWORD`
-- Iceberg catalog connection: `ICEBERG_JDBC_URI`, `ICEBERG_JDBC_USER`, `ICEBERG_JDBC_PASSWORD`
-- demo PostgreSQL connection: `DEMO_POSTGRES_HOST`, `DEMO_POSTGRES_PORT`, `DEMO_POSTGRES_DB`, `DEMO_POSTGRES_USER`, `DEMO_POSTGRES_PASSWORD`
-- object storage and Java defaults: `AWS_*`, `AWS_S3_ENDPOINT`, `JAVA_HOME`
+That means:
 
-That means a notebook can do this:
+- exploration can happen in JupyterHub
+- reusable platform logic should move into the repository
+- deployment should happen through Git and CI/CD
+
+## 2. The configuration layers
+
+The cleanest way to understand JupyterHub in this repo is to separate configuration by scope.
+
+### 2.1 `docker-compose.yml`
+
+This is where shared service endpoints, credentials, and platform defaults enter the `jupyterhub` service.
+
+Examples:
+
+- `SPARK_MASTER`
+- `TRINO_HOST`
+- `MLFLOW_TRACKING_URI`
+- `DEMO_POSTGRES_HOST`
+- `AWS_S3_ENDPOINT`
+
+Use this layer when:
+
+- the value belongs to the environment as a whole
+- every user session should inherit it
+
+### 2.2 `jupyterhub/jupyterhub_config.py`
+
+This is where JupyterHub forwards environment values into each user server and applies resource rules.
+
+Examples already present in this repo:
+
+- `c.Spawner.environment`
+- `c.Spawner.mem_limit = "4G"`
+- `c.Spawner.cpu_limit = 2.0`
+- idle culler configuration
+
+Use this layer when:
+
+- the value should be available to every user session
+- you want to control notebook server limits or behavior
+
+### 2.3 `spark/conf/spark-defaults.conf`
+
+This is where cluster-wide Spark defaults belong.
+
+Use this layer when:
+
+- the setting should apply to all Spark jobs
+- the setting describes shared Spark behavior rather than one notebook choice
+
+Examples:
+
+- catalog wiring
+- S3 or MinIO endpoint defaults
+- serializer settings
+- SQL extensions
+- shuffle defaults
+
+### 2.4 `jupyterhub/Dockerfile`
+
+This is where shared packages for all users should be installed.
+
+Use this layer when:
+
+- everyone should have the same Python package
+- the package is part of the supported notebook environment
+
+### 2.5 Notebook code
+
+Notebook code should read from environment variables and use platform defaults instead of hardcoding service addresses.
+
+Good example:
 
 ```python
 import os
 
 trino_host = os.environ["TRINO_HOST"]
+spark_master = os.environ["SPARK_MASTER"]
 mlflow_uri = os.environ["MLFLOW_TRACKING_URI"]
-postgres_db = os.environ["DEMO_POSTGRES_DB"]
 ```
 
-instead of hardcoding `trino`, `demo-postgres`, `retail_db`, or `http://mlflow:5000` in every file.
+Bad example:
 
-## How to make notebook configuration repeatable
-
-When you want a new default for all JupyterHub users:
-
-1. Add or update the variable in `docker-compose.yml` under the `jupyterhub.environment` block.
-2. Forward it in `jupyterhub/jupyterhub_config.py` inside `c.Spawner.environment`.
-3. Update notebook code to read `os.environ.get(...)` instead of embedding the literal value.
-4. Restart JupyterHub:
-
-```bash
-docker compose up -d --build jupyterhub
+```python
+trino_host = "trino"
+spark_master = "spark://spark-master:7077"
+mlflow_uri = "http://mlflow:5000"
 ```
 
-If you change only `docker-compose.yml` or `jupyterhub/jupyterhub_config.py`, a restart is enough:
+The second style makes notebooks less portable and harder to maintain.
 
-```bash
-docker compose up -d jupyterhub
-```
+## 3. What is already centralized in this repo
 
-## Where Spark settings should live
+The current JupyterHub setup already forwards these kinds of values into user sessions:
 
-Put Spark defaults in the right place based on scope:
+- Spark master endpoint
+- Trino host, port, catalog, and schema
+- MLflow tracking URI and credentials
+- Iceberg JDBC connection values
+- demo PostgreSQL connection values
+- AWS and MinIO-related values
+- Java and PySpark defaults
 
-- put cluster-wide settings in [spark/conf/spark-defaults.conf](/Users/rohan/Projects/netsol/ml-platform/spark/conf/spark-defaults.conf)
-- put Jupyter-only environment values in [jupyterhub/jupyterhub_config.py](/Users/rohan/Projects/netsol/ml-platform/jupyterhub/jupyterhub_config.py)
-- avoid keeping connector hosts, passwords, or catalog URIs inline in notebooks unless they are intentionally one-off
+That means the notebooks can focus on analysis logic instead of repeating platform wiring.
 
-Examples of settings that belong in `spark-defaults.conf`:
+## 4. Spark-related environment configuration
 
-- catalog wiring
-- S3 or MinIO endpoint defaults
-- serializer settings
-- shuffle partition defaults
+Spark deserves its own section because beginners often mix cluster settings with notebook settings.
+
+### 4.1 What belongs in shared Spark configuration
+
+Put these in `spark/conf/spark-defaults.conf` when they should apply to all users and jobs:
+
+- Iceberg catalog configuration
+- S3 or MinIO integration
 - Spark SQL extensions
+- cluster-wide serialization defaults
+- cluster-wide partitioning defaults
 
-Examples of settings that belong in JupyterHub environment variables:
+These are platform-level decisions.
 
-- source database host and credentials
-- Trino host, port, and default catalog
+### 4.2 What belongs in JupyterHub environment variables
+
+Put these in JupyterHub environment wiring when notebooks should read them directly:
+
+- source database host, database name, and credentials
+- Trino host and default catalog
 - MLflow tracking URI
-- per-environment endpoints that notebooks read directly
+- endpoints that depend on the environment
 
-## How to add packages for every developer
+These are connection values, not Spark engine behavior.
 
-If everyone using JupyterHub should have a package, add it to [jupyterhub/Dockerfile](/Users/rohan/Projects/netsol/ml-platform/jupyterhub/Dockerfile) and rebuild the image. Do not rely on ad hoc `pip install` inside a notebook if you want the environment to stay repeatable.
+### 4.3 What belongs in notebook-level choices
 
-Typical workflow:
+Keep these in notebook code only when they are truly part of one analysis:
+
+- temporary dataframe variables
+- one-off exploratory queries
+- experiment-specific feature subsets
+- temporary plotting settings
+
+Do not promote one-off experiment values into platform-wide configuration unless they are genuinely shared needs.
+
+### 4.4 How to work with Spark responsibly
+
+When using Spark in JupyterHub:
+
+- avoid collecting large datasets to the notebook process unless necessary
+- inspect only the first rows when learning the shape
+- use Spark for distributed work and pandas for small local inspection
+- watch the Spark UI to understand what your notebook started
+
+### 4.5 How to inspect Spark workers
+
+Open the Spark master and worker UIs.
+
+Check:
+
+- whether the worker is alive
+- how much memory is assigned
+- how many cores are available
+- whether a job is waiting or running
+
+If Spark feels "slow," inspect the worker UI before changing code blindly.
+
+## 5. Flexible environment configuration patterns
+
+This guide intentionally avoids hardcoding a single target database because notebook environments should stay flexible.
+
+### 5.1 Preferred pattern
+
+Use environment variables or small user-config objects to decide which target to use.
+
+For example, notebook code can read:
+
+- `TRINO_CATALOG`
+- `TRINO_SCHEMA`
+- `DEMO_POSTGRES_HOST`
+
+This keeps the environment portable across local, shared, and hosted variants.
+
+### 5.2 Avoid these patterns
+
+- hardcoding hostnames directly in notebook cells
+- storing passwords in notebook files
+- assuming one schema or catalog will always be correct forever
+- changing platform-wide config just for one short-lived experiment
+
+## 6. Package and environment management
+
+Package management should be predictable.
+
+### 6.1 If every user needs a package
+
+Add it to `jupyterhub/Dockerfile` and rebuild the image.
+
+Why:
+
+- every user gets the same environment
+- notebooks stay reproducible
+- package installation does not depend on a manual step
+
+### 6.2 If one user needs a temporary experiment package
+
+Treat that as exploratory work only.
+
+Prefer one of these paths:
+
+- add the package properly to the image if it is becoming standard
+- use a clearly temporary, user-local environment if the package is purely experimental
+
+Do not let long-lived important workflows depend on "I installed it once in a notebook terminal."
+
+### 6.3 Why ad hoc package installs are risky
+
+- they are hard to reproduce
+- other users do not have the same environment
+- they disappear when the environment is rebuilt
+- debugging becomes much harder
+
+## 7. Resource and usage management
+
+JupyterHub is a shared user environment. That means resource discipline matters.
+
+### 7.1 Current repo limits
+
+The current config sets:
+
+- memory limit: `4G`
+- CPU limit: `2.0`
+- idle culler timeout: 1 hour
+
+These limits teach an important habit: a notebook environment is not infinite compute.
+
+### 7.2 Good usage patterns
+
+- stop or idle out sessions you are not using
+- use Spark for larger work rather than forcing everything into pandas
+- avoid reading full large tables into memory without filtering
+- save durable logic back into repository files
+
+### 7.3 Bad usage patterns
+
+- leaving heavy sessions open all day
+- repeatedly loading large datasets into local notebook memory
+- treating one notebook server as a long-running production service
+- hiding important logic only in notebook cells
+
+## 8. How users should work inside their JupyterHub environments
+
+This is the recommended operating model.
+
+### 8.1 Use JupyterHub for exploration
+
+Good uses:
+
+- inspect data shape
+- test Spark connectivity
+- try Trino queries
+- compare model ideas
+- understand how the platform works
+
+### 8.2 Move durable logic back into the repository
+
+When notebook work becomes important, convert it into maintained code:
+
+- dbt models
+- Python modules
+- Airflow task logic
+- Feast definitions
+- quality checks
+
+This is how exploratory work becomes platform work.
+
+### 8.3 Keep secrets out of notebooks
+
+Use environment variables passed by JupyterHub.
+
+Do not:
+
+- paste passwords into notebook cells
+- commit credentials
+- duplicate connection strings in many notebooks
+
+### 8.4 Prefer `.py` walkthroughs when appropriate
+
+This repository already uses `.py` notebook-style walkthroughs in `notebooks/`.
+
+Why that is reasonable:
+
+- cleaner Git diffs
+- easier code review
+- less notebook metadata noise
+
+Use `.ipynb` when rich interactive output is essential. Use `.py` when the goal is versioned, reviewable teaching material.
+
+## 9. How to update JupyterHub defaults safely
+
+When a shared notebook default needs to change:
+
+1. update `docker-compose.yml` if the value enters the JupyterHub service there
+2. update `jupyterhub/jupyterhub_config.py` if the spawned user servers need that value
+3. update notebooks to read the variable instead of using a literal value
+4. rebuild or restart JupyterHub as needed
+
+Typical commands:
 
 ```bash
 docker compose build jupyterhub
 docker compose up -d jupyterhub
 ```
 
-## How to use JupyterHub in this repo
+If only compose or JupyterHub config changed, a restart may be enough.
 
-The usual flow is:
+## 10. How to connect external tools such as VS Code
 
-1. Open JupyterHub at `http://localhost:8888`.
-2. Sign in and start your server.
-3. Open files from `/srv/jupyterhub/notebooks`.
-4. Use the shared environment variables instead of editing service endpoints in the notebook.
-5. Use Spark for ingestion or large transformations, Trino for SQL access, and MLflow for experiment logging.
+VS Code can connect to the Jupyter server started by JupyterHub.
 
-The notebooks also have access to:
+High-level process:
 
-- `/srv/jupyterhub/great_expectations`
-- `/srv/jupyterhub/evidently`
-- `/usr/local/spark/conf/spark-defaults.conf`
+1. log into JupyterHub
+2. start your server
+3. run `jupyter server list` in a terminal inside JupyterLab
+4. copy the single-user server URL
+5. point VS Code's Jupyter extension at that existing server
 
-## How to connect VS Code to JupyterHub
+This lets you keep the environment managed by JupyterHub while using VS Code as a client.
 
-The simplest path is to use VS Code as a client for the Jupyter server that JupyterHub starts for your user.
+## 11. Troubleshooting checklist
 
-1. Log into JupyterHub in the browser and start your user server.
-2. In JupyterLab, open a terminal and run:
+### 11.1 Notebook cannot reach Spark
 
-```bash
-jupyter server list
-```
+Check:
 
-3. Copy the full single-user server URL from that output.
-4. In VS Code, install the `Python` and `Jupyter` extensions.
-5. Open the Command Palette and run `Jupyter: Specify Jupyter Server for Connections`.
-6. Choose `Existing`.
-7. Paste the URL from `jupyter server list`.
+- `SPARK_MASTER`
+- Spark master UI health
+- worker availability
+- whether the cluster is already overloaded
 
-After that, VS Code can run notebooks against the same JupyterHub-backed kernel environment.
+### 11.2 Notebook cannot reach Trino
 
-If the pasted URL does not work from VS Code, first confirm that your browser session can open the same single-user server URL directly.
+Check:
 
-## `.py` versus `.ipynb` in this repo
+- `TRINO_HOST`
+- `TRINO_PORT`
+- Trino service health
+- whether the chosen catalog and schema exist
 
-The current files in [notebooks](/Users/rohan/Projects/netsol/ml-platform/notebooks) are intentionally plain `.py` walkthrough scripts, not `.ipynb` notebooks.
+### 11.3 Notebook cannot log to MLflow
 
-That is reasonable here because `.py` files:
+Check:
 
-- diff cleanly in Git
-- are easier to review
-- avoid noisy notebook metadata
-- work well for scripted walkthroughs of the platform
+- `MLFLOW_TRACKING_URI`
+- credentials
+- MLflow service availability
 
-Use `.ipynb` when you specifically want:
+### 11.4 Notebook package is missing
 
-- rich cell outputs committed with the file
-- markdown cells inside the document
-- widget-heavy exploratory work
-- a more notebook-native VS Code or JupyterLab authoring experience
+Check:
 
-So the short answer is: no, they do not have to be `.ipynb`. In this repo the `.py` choice is consistent with the documented "notebook-style walkthrough" approach.
+- whether the package belongs in `jupyterhub/Dockerfile`
+- whether the image was rebuilt
+- whether the user is depending on an untracked manual install
 
-If you want both clean Git diffs and real notebook files, the next step would be to adopt Jupytext and keep paired `.ipynb` and `.py` files.
+### 11.5 Notebook is slow or crashes
+
+Check:
+
+- memory pressure
+- pandas usage on large datasets
+- whether the work should be pushed to Spark
+- whether the session needs restart
+
+## 12. End condition for this guide
+
+You understand this guide when you can explain:
+
+- which settings belong in Compose, JupyterHub config, Spark defaults, image build files, and notebooks
+- how to keep notebook environments flexible without hardcoding one target database
+- how to manage packages reproducibly
+- how to work within shared resource limits
+- how to use JupyterHub for exploration without turning it into an uncontrolled deployment path

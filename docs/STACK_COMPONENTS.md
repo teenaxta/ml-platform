@@ -26,7 +26,7 @@ Use it to understand how table metadata is managed separately from the files the
 
 ### Spark
 
-Spark performs distributed ingestion and large-table processing. In this stack it loads source tables from PostgreSQL into Iceberg and can also be used from notebooks for custom ETL or model preparation.
+Spark provides distributed processing for custom ETL, model preparation, and notebook-driven large-table work. In this teaching stack the default seeded bootstrap path is intentionally lightweight, but Spark remains the main distributed compute engine available to users.
 
 Use Spark when data volume or transformation complexity is too large for simple pandas work.
 
@@ -41,6 +41,12 @@ Use Trino when you want one SQL engine for analytics, ad hoc joins, BI tooling, 
 dbt turns raw lakehouse tables into analytics marts. In this repo the `dbt/retail` project builds `customer_360`, `customer_behavior`, `product_performance`, and `churn_training_dataset`.
 
 Use dbt for versioned SQL transformations, tests, documentation, and repeatable analytics logic.
+
+### dbt docs
+
+The dbt docs site is the dashboard for understanding model lineage, descriptions, tests, and dependencies.
+
+Use it when you want to understand how raw tables become analytical marts, or when you need to verify that a model change is documented and connected correctly.
 
 ### Airflow
 
@@ -91,7 +97,7 @@ Use Superset to build charts, dashboards, and SQL-based explorations.
 
 ### Prometheus and Grafana
 
-Prometheus scrapes runtime metrics, and Grafana visualizes them. This stack includes cAdvisor and a Postgres exporter so you can monitor container health and database activity.
+Prometheus scrapes runtime metrics, and Grafana visualizes them. This stack currently includes Prometheus itself and a Postgres exporter so you can monitor the platform and the demo database activity.
 
 Use them to understand operational observability for the platform itself, not just the business data inside it.
 

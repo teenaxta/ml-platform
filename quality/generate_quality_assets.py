@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pandas as pd
+import requests
 import trino
 from evidently.metric_preset import DataDriftPreset, DataQualityPreset
 from evidently.report import Report
@@ -13,6 +15,18 @@ ROOT_DIR = Path("/workspace")
 GE_ROOT = ROOT_DIR / "great_expectations"
 GE_DATA = GE_ROOT / "data"
 EVIDENTLY_REPORTS = ROOT_DIR / "evidently" / "reports"
+
+
+def wait_for_http(url: str, attempts: int = 24, delay: int = 5) -> None:
+    for _ in range(attempts):
+        try:
+            response = requests.get(url, timeout=5)
+            if response.status_code < 500:
+                return
+        except Exception:
+            pass
+        time.sleep(delay)
+    raise RuntimeError(f"Timed out waiting for {url}")
 
 
 def trino_query(sql: str) -> pd.DataFrame:
@@ -91,5 +105,6 @@ def build_evidently_report() -> None:
 
 
 if __name__ == "__main__":
+    wait_for_http("http://trino:8080/v1/info")
     build_ge_docs()
     build_evidently_report()

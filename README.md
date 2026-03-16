@@ -22,6 +22,9 @@ The stack is built around one retail/churn demo storyline so you can follow the 
 - [GETTING_STARTED.md](GETTING_STARTED.md)
 - [docs/STACK_COMPONENTS.md](docs/STACK_COMPONENTS.md)
 - [docs/PRACTICE_LAB.md](docs/PRACTICE_LAB.md)
+- [docs/PRACTICE_LAB_FOUNDATIONS.md](docs/PRACTICE_LAB_FOUNDATIONS.md)
+- [docs/PRACTICE_LAB_1_PRODUCTION.md](docs/PRACTICE_LAB_1_PRODUCTION.md)
+- [docs/PRACTICE_LAB_2_REPO_NATIVE.md](docs/PRACTICE_LAB_2_REPO_NATIVE.md)
 - [docs/JUPYTERHUB_GUIDE.md](docs/JUPYTERHUB_GUIDE.md)
 - [docs/ACCESS_AND_URLS.md](docs/ACCESS_AND_URLS.md)
 

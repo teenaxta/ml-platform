@@ -40,6 +40,8 @@ Wait for the one-shot bootstrap jobs to exit successfully. Together they do the 
 - trains a churn model, logs a demo run to MLflow, and writes an MLServer model bundle
 - creates an Evidently drift report
 
+If `raw-bootstrap` fails, inspect its logs first. On smaller Docker Desktop allocations the bootstrap jobs can still fail because the Python, JVM, and query workload does not have enough memory. If you see memory-related failures, raise Docker memory and retry `docker compose up -d`.
+
 ## 4. Open the UIs
 
 See [docs/ACCESS_AND_URLS.md](docs/ACCESS_AND_URLS.md) for the complete list.
@@ -58,16 +60,16 @@ The main starting points are:
 
 Open [docs/PRACTICE_LAB.md](docs/PRACTICE_LAB.md). It walks through the stack as a learner:
 
-1. connect to a PostgreSQL source
-2. ingest data into the lakehouse
-3. transform it with dbt
-4. query it with Trino
-5. validate it with Great Expectations
-6. expose features with Feast
-7. train and track a model with MLflow
-8. serve the model with MLServer
-9. monitor drift with Evidently
-10. visualize metrics and business data in Grafana and Superset
+1. read the shared foundations guide
+2. choose the production-style or simpler repository-native lab
+3. connect to a PostgreSQL source
+4. inspect lakehouse ingestion and transformation outputs
+5. validate data with dbt, Great Expectations, and the dbt docs site
+6. inspect features in Feast
+7. inspect training and experiment tracking in MLflow
+8. inspect model serving through MLServer
+9. inspect monitoring outputs in Evidently, Grafana, and Prometheus
+10. use JupyterHub, Superset, CloudBeaver, and Trino as supported access layers
 
 If you want repeatable notebook defaults, shared Spark settings, or VS Code connectivity, also read [docs/JUPYTERHUB_GUIDE.md](docs/JUPYTERHUB_GUIDE.md).
 
@@ -78,8 +80,5 @@ docker compose ps
 docker compose logs -f superset
 docker compose logs -f trino
 docker compose logs -f airflow-webserver
-docker compose exec dbt dbt run --project-dir /opt/dbt/retail --profiles-dir /opt/dbt
-docker compose exec dbt dbt docs generate --project-dir /opt/dbt/retail --profiles-dir /opt/dbt
-docker compose exec trino trino --server http://localhost:8080 --catalog iceberg --schema analytics
 docker compose down
 ```

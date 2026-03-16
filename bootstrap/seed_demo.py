@@ -7,11 +7,14 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 import mlflow
 import pandas as pd
+import pyarrow as pa
+import pyarrow.fs as pa_fs
+import pyarrow.parquet as pq
 import trino
-from pyspark.sql import SparkSession
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, f1_score
 from sklearn.model_selection import train_test_split
@@ -21,11 +24,11 @@ ROOT_DIR = Path(os.environ.get("ROOT_DIR", Path(__file__).resolve().parents[1]))
 DBT_ROOT = ROOT_DIR / "dbt"
 DBT_PROJECT = DBT_ROOT / "retail"
 MLSERVER_MODEL_DIR = ROOT_DIR / "mlserver" / "models" / "churn-model"
-SPARK_MASTER_URL = os.environ.get("SPARK_MASTER_URL", "spark://spark-master:7077")
 TRINO_HOST = os.environ.get("TRINO_HOST", "trino")
 TRINO_PORT = int(os.environ.get("TRINO_PORT", "8080"))
-WAREHOUSE_CATALOG = "warehouse"
+TRINO_ICEBERG_CATALOG = "iceberg"
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
+S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "http://minio:9000")
 ICEBERG_JDBC_URI = os.environ.get(
     "ICEBERG_JDBC_URI",
     "jdbc:postgresql://postgres-iceberg:5432/iceberg_catalog",
@@ -60,59 +63,6 @@ def wait_for_file(path: Path, attempts: int = 20, delay: int = 2) -> None:
     raise RuntimeError(f"Timed out waiting for {path}")
 
 
-def get_spark() -> SparkSession:
-    packages = ",".join(
-        [
-            "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.5.2",
-            "org.apache.iceberg:iceberg-aws-bundle:1.5.2",
-            "software.amazon.awssdk:url-connection-client:2.25.53",
-            "org.apache.hadoop:hadoop-aws:3.3.4",
-            "com.amazonaws:aws-java-sdk-bundle:1.12.262",
-            "org.postgresql:postgresql:42.7.3",
-        ]
-    )
-    builder = (
-        SparkSession.builder.appName("ml-platform-bootstrap")
-        .master(SPARK_MASTER_URL)
-        .config("spark.jars.packages", packages)
-        .config(
-            "spark.sql.extensions",
-            "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
-        )
-        .config("spark.sql.catalog.warehouse", "org.apache.iceberg.spark.SparkCatalog")
-        .config("spark.sql.catalog.warehouse.type", "jdbc")
-        .config("spark.sql.catalog.warehouse.uri", ICEBERG_JDBC_URI)
-        .config("spark.sql.catalog.warehouse.jdbc.user", ICEBERG_JDBC_USER)
-        .config("spark.sql.catalog.warehouse.jdbc.password", ICEBERG_JDBC_PASSWORD)
-        .config("spark.sql.catalog.warehouse.jdbc.schema-version", "V1")
-        .config("spark.sql.catalog.warehouse.warehouse", "s3://warehouse/")
-        .config("spark.sql.catalog.warehouse.io-impl", "org.apache.iceberg.aws.s3.S3FileIO")
-        .config("spark.sql.catalog.warehouse.http-client.type", "urlconnection")
-        .config("spark.sql.catalog.warehouse.client.region", AWS_REGION)
-        .config("spark.sql.catalog.warehouse.s3.endpoint", "http://minio:9000")
-        .config("spark.sql.catalog.warehouse.s3.path-style-access", "true")
-        .config("spark.sql.catalog.warehouse.s3.access-key-id", os.environ["AWS_ACCESS_KEY_ID"])
-        .config(
-            "spark.sql.catalog.warehouse.s3.secret-access-key",
-            os.environ["AWS_SECRET_ACCESS_KEY"],
-        )
-        .config("spark.hadoop.fs.s3a.endpoint", "http://minio:9000")
-        .config("spark.hadoop.fs.s3a.path.style.access", "true")
-        .config("spark.hadoop.fs.s3a.access.key", os.environ["AWS_ACCESS_KEY_ID"])
-        .config("spark.hadoop.fs.s3a.secret.key", os.environ["AWS_SECRET_ACCESS_KEY"])
-        .config("spark.executorEnv.AWS_ACCESS_KEY_ID", os.environ["AWS_ACCESS_KEY_ID"])
-        .config("spark.executorEnv.AWS_SECRET_ACCESS_KEY", os.environ["AWS_SECRET_ACCESS_KEY"])
-        .config("spark.executorEnv.AWS_REGION", AWS_REGION)
-        .config("spark.executorEnv.AWS_DEFAULT_REGION", AWS_REGION)
-        .config(
-            "spark.hadoop.fs.s3a.aws.credentials.provider",
-            "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider",
-        )
-        .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
-    )
-    return builder.getOrCreate()
-
-
 def trino_connection() -> trino.dbapi.Connection:
     return trino.dbapi.connect(
         host=TRINO_HOST,
@@ -130,6 +80,41 @@ def trino_query(sql: str) -> pd.DataFrame:
     rows = cur.fetchall()
     columns = [col[0] for col in cur.description]
     return pd.DataFrame(rows, columns=columns)
+
+
+def trino_execute(sql: str) -> None:
+    conn = trino_connection()
+    cur = conn.cursor()
+    cur.execute(sql)
+
+
+def s3_filesystem() -> pa_fs.S3FileSystem:
+    parsed = urlparse(S3_ENDPOINT)
+    return pa_fs.S3FileSystem(
+        access_key=os.environ["AWS_ACCESS_KEY_ID"],
+        secret_key=os.environ["AWS_SECRET_ACCESS_KEY"],
+        region=AWS_REGION,
+        scheme=parsed.scheme or "http",
+        endpoint_override=parsed.netloc or parsed.path,
+    )
+
+
+def parse_s3_uri(uri: str) -> tuple[str, str]:
+    parsed = urlparse(uri)
+    if parsed.scheme != "s3":
+        raise ValueError(f"Expected s3:// URI, got {uri}")
+    return parsed.netloc, parsed.path.lstrip("/").rstrip("/")
+
+
+def write_parquet_to_s3(df: pd.DataFrame, uri: str) -> None:
+    bucket, prefix = parse_s3_uri(uri)
+    dataset_path = f"{bucket}/{prefix}"
+    fs = s3_filesystem()
+    fs.delete_dir_contents(dataset_path, missing_dir_ok=True)
+    fs.create_dir(dataset_path, recursive=True)
+    table = pa.Table.from_pandas(df, preserve_index=False)
+    with fs.open_output_stream(f"{dataset_path}/part-00000.parquet") as sink:
+        pq.write_table(table, sink)
 
 
 def wait_for_trino_schema(schema: str, attempts: int = 24, delay: int = 5) -> None:
@@ -150,11 +135,20 @@ def ensure_seed_dirs() -> None:
 
 
 def ingest_raw() -> None:
-    spark = get_spark()
-    spark.sql("CREATE NAMESPACE IF NOT EXISTS warehouse.retail_raw")
-    spark.sql("CREATE NAMESPACE IF NOT EXISTS warehouse.analytics")
-    jdbc_url = "jdbc:postgresql://demo-postgres:5432/retail_db"
-    props = {"user": "analyst", "password": "analyst123", "driver": "org.postgresql.Driver"}
+    wait_for_http("http://trino:8080/v1/info", attempts=24, delay=5)
+    trino_execute(f"CREATE SCHEMA IF NOT EXISTS {TRINO_ICEBERG_CATALOG}.retail_raw")
+    trino_execute(f"CREATE SCHEMA IF NOT EXISTS {TRINO_ICEBERG_CATALOG}.analytics")
+    source_queries = {
+        "events": """
+            SELECT
+              event_id,
+              customer_id,
+              event_type,
+              event_ts,
+              json_format(metadata) AS metadata
+            FROM postgresql.public.events
+        """
+    }
     tables = [
         "customers",
         "products",
@@ -166,19 +160,27 @@ def ingest_raw() -> None:
         "support_tickets",
     ]
     for table in tables:
-        df = spark.read.jdbc(jdbc_url, f"public.{table}", properties=props)
-        df.writeTo(f"{WAREHOUSE_CATALOG}.retail_raw.{table}").createOrReplace()
-        log(f"Loaded {table}: {df.count()} rows")
-    spark.stop()
-    wait_for_http("http://trino:8080/v1/info", attempts=24, delay=5)
+        trino_execute(f"DROP TABLE IF EXISTS {TRINO_ICEBERG_CATALOG}.retail_raw.{table}")
+        source_query = source_queries.get(table, f"SELECT * FROM postgresql.public.{table}")
+        trino_execute(
+            f"""
+            CREATE TABLE {TRINO_ICEBERG_CATALOG}.retail_raw.{table} AS
+            {source_query}
+            """
+        )
+        row_count = int(
+            trino_query(
+                f"SELECT COUNT(*) AS row_count FROM {TRINO_ICEBERG_CATALOG}.retail_raw.{table}"
+            )["row_count"].iloc[0]
+        )
+        log(f"Loaded {table}: {row_count} rows")
     wait_for_trino_schema("retail_raw")
     wait_for_trino_schema("analytics")
     log("Verified retail_raw and analytics schemas are visible in Trino.")
 
 
 def publish_feast_sources() -> None:
-    spark = get_spark()
-    customer_stats = spark.sql(
+    customer_stats = trino_query(
         """
         SELECT
           customer_id,
@@ -190,12 +192,12 @@ def publish_feast_sources() -> None:
           days_since_last_order,
           avg_order_value,
           event_timestamp
-        FROM warehouse.analytics.customer_360
+        FROM iceberg.analytics.customer_360
         """
     )
-    customer_stats.write.mode("overwrite").parquet("s3a://warehouse/feast/customer_stats/")
+    write_parquet_to_s3(customer_stats, "s3://warehouse/feast/customer_stats/")
 
-    customer_behavior = spark.sql(
+    customer_behavior = trino_query(
         """
         SELECT
           customer_id,
@@ -204,12 +206,12 @@ def publish_feast_sources() -> None:
           support_tickets,
           checkout_rate,
           event_timestamp
-        FROM warehouse.analytics.customer_behavior
+        FROM iceberg.analytics.customer_behavior
         """
     )
-    customer_behavior.write.mode("overwrite").parquet("s3a://warehouse/feast/customer_behavior/")
+    write_parquet_to_s3(customer_behavior, "s3://warehouse/feast/customer_behavior/")
 
-    product_stats = spark.sql(
+    product_stats = trino_query(
         """
         SELECT
           product_id,
@@ -220,23 +222,20 @@ def publish_feast_sources() -> None:
           revenue,
           stock_qty,
           event_timestamp
-        FROM warehouse.analytics.product_performance
+        FROM iceberg.analytics.product_performance
         """
     )
-    product_stats.write.mode("overwrite").parquet("s3a://warehouse/feast/product_stats/")
-    spark.stop()
+    write_parquet_to_s3(product_stats, "s3://warehouse/feast/product_stats/")
 
 
 def train_and_log_model() -> pd.DataFrame:
-    spark = get_spark()
-    dataset = spark.sql(
+    dataset = trino_query(
         """
         SELECT *
-        FROM warehouse.analytics.churn_training_dataset
+        FROM iceberg.analytics.churn_training_dataset
         ORDER BY customer_id
         """
-    ).toPandas()
-    spark.stop()
+    )
     feature_columns = [
         "age",
         "total_orders",
