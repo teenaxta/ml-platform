@@ -10,6 +10,10 @@ This repo is now a local teaching stack for an end-to-end ML and analytics platf
 
 The stack is built around one retail/churn demo storyline so you can follow the same data through ingestion, transformation, feature engineering, validation, experimentation, monitoring, and dashboards.
 
+## The Platform
+
+![Data Science Platform](resources/data_science_platform.png)
+
 ## Start here
 
 1. Copy `.env.example` to `.env` and change the passwords.
