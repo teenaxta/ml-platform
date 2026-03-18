@@ -68,8 +68,8 @@ Model training (RandomForest via pyspark.ml)
       │
       ├──▶ MLflow logs experiments, metrics, model artifacts
       │
-      ▼ MLServer serves the model via REST API
-Inference endpoint (http://localhost:8085/v2/models/churn-model/infer)
+      ▼ MLServer serves the model via REST API (after manual deployment)
+Inference endpoint (http://localhost:8085/v2/models/<model-name>/infer)
       │
       ├──▶ Great Expectations validates data quality
       ├──▶ Evidently detects data drift

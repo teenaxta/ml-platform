@@ -11,7 +11,6 @@ from pathlib import Path
 ROOT_DIR = Path(os.environ.get("ROOT_DIR", Path(__file__).resolve().parents[1]))
 DBT_ROOT = ROOT_DIR / "dbt"
 DBT_PROJECT = DBT_ROOT / "retail"
-MLSERVER_MODEL_DIR = ROOT_DIR / "mlserver" / "models" / "churn-model"
 TRINO_HOST = os.environ.get("TRINO_HOST", "trino")
 TRINO_PORT = int(os.environ.get("TRINO_PORT", "8080"))
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
@@ -76,6 +75,15 @@ def get_spark():
         .appName("RetailPlatformBootstrap")
         .master(SPARK_MASTER_URL)
         .config("spark.jars.packages", PACKAGES)
+        # Memory tuning for Docker environments
+        .config("spark.driver.memory", "1g")
+        .config("spark.executor.memory", "1g")
+        .config("spark.executor.memoryOverhead", "512m")
+        .config("spark.sql.shuffle.partitions", "4")
+        .config("spark.default.parallelism", "2")
+        .config("spark.sql.adaptive.enabled", "true")
+        .config("spark.network.timeout", "300s")
+        .config("spark.executor.heartbeatInterval", "60s")
         .config(
             "spark.sql.extensions",
             "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
@@ -159,7 +167,7 @@ def publish_feast_sources(spark) -> None:
 
 
 def train_and_log_model(spark) -> None:
-    """Train a churn model with PySpark MLlib, log to MLflow, and save for MLServer."""
+    """Train a churn model with PySpark MLlib and log to MLflow."""
     import mlflow
     import mlflow.spark
 
@@ -180,14 +188,17 @@ def train_and_log_model(spark) -> None:
         dataset = dataset.withColumn(feature_col, col(feature_col).cast("double"))
     dataset = dataset.withColumn("churn_label", col("churn_label").cast("double"))
 
+    dataset = dataset.cache()
+    row_count = dataset.count()
     train_df, test_df = dataset.randomSplit([0.7, 0.3], seed=42)
-    log(f"  Train: {train_df.count()} rows, Test: {test_df.count()} rows")
+    log(f"  Dataset: {row_count} rows | Train: {train_df.count()}, Test: {test_df.count()}")
 
     assembler = VectorAssembler(inputCols=FEATURE_COLUMNS, outputCol="features")
     rf = RandomForestClassifier(
         featuresCol="features",
         labelCol="churn_label",
-        numTrees=50,
+        numTrees=20,
+        maxDepth=5,
         seed=42,
     )
     pipeline = Pipeline(stages=[assembler, rf])
@@ -207,36 +218,6 @@ def train_and_log_model(spark) -> None:
     auc = float(auc_evaluator.evaluate(predictions))
     log(f"  Accuracy: {accuracy:.4f}, AUC: {auc:.4f}")
 
-    mlflow.set_tracking_uri(os.environ["MLFLOW_TRACKING_URI"])
-    mlflow.set_experiment("retail-churn-demo")
-
-    with mlflow.start_run(run_name="bootstrap-pyspark-random-forest"):
-        mlflow.log_params({
-            "model_type": "PySpark_RandomForestClassifier",
-            "num_trees": 50,
-            "framework": "pyspark.ml",
-        })
-        mlflow.log_metrics({"accuracy": accuracy, "auc": auc})
-        mlflow.set_tags({
-            "demo_model_path": "mlserver/models/churn-model/mlflow_model",
-            "training_framework": "PySpark MLlib",
-        })
-
-        mlflow_model_path = MLSERVER_MODEL_DIR / "mlflow_model"
-        mlflow_model_path.mkdir(parents=True, exist_ok=True)
-        mlflow.spark.save_model(model, str(mlflow_model_path))
-        log(f"  MLflow Spark model saved to {mlflow_model_path}")
-
-    model_settings = {
-        "name": "churn-model",
-        "implementation": "mlserver_mlflow.MLflowRuntime",
-        "parameters": {"uri": "./mlflow_model", "version": "v1"},
-    }
-    (MLSERVER_MODEL_DIR / "model-settings.json").write_text(
-        json.dumps(model_settings, indent=2),
-        encoding="utf-8",
-    )
-
     all_predictions = model.transform(dataset)
     scored_pd = all_predictions.select(
         *FEATURE_COLUMNS,
@@ -250,6 +231,20 @@ def train_and_log_model(spark) -> None:
     scored_pd.to_csv(ROOT_DIR / "evidently" / "scored_dataset.csv", index=False)
     log("  Scored dataset written for Evidently.")
 
+    mlflow.set_tracking_uri(os.environ["MLFLOW_TRACKING_URI"])
+    mlflow.set_experiment("retail-churn-demo")
+
+    with mlflow.start_run(run_name="bootstrap-pyspark-random-forest"):
+        mlflow.log_params({
+            "model_type": "PySpark_RandomForestClassifier",
+            "num_trees": 50,
+            "framework": "pyspark.ml",
+        })
+        mlflow.log_metrics({"accuracy": accuracy, "auc": auc})
+        mlflow.set_tags({"training_framework": "PySpark MLlib"})
+        mlflow.spark.log_model(model, artifact_path="spark-model")
+        log("  Model logged to MLflow.")
+
 
 def write_seed_manifest() -> None:
     manifest = {
@@ -257,7 +252,6 @@ def write_seed_manifest() -> None:
         "dbt_docs": "dbt/retail/target/index.html",
         "great_expectations_docs": "great_expectations/uncommitted/data_docs/local_site/index.html",
         "evidently_report": "evidently/reports/index.html",
-        "mlserver_model": "mlserver/models/churn-model/mlflow_model",
     }
     (ROOT_DIR / "bootstrap" / "seed_manifest.json").write_text(
         json.dumps(manifest, indent=2),
@@ -266,7 +260,7 @@ def write_seed_manifest() -> None:
 
 
 def ensure_seed_dirs() -> None:
-    for path in [MLSERVER_MODEL_DIR, DBT_PROJECT / "target", ROOT_DIR / "evidently"]:
+    for path in [DBT_PROJECT / "target", ROOT_DIR / "evidently"]:
         path.mkdir(parents=True, exist_ok=True)
 
 
@@ -281,7 +275,10 @@ def run_post_dbt() -> None:
         publish_feast_sources(spark)
         train_and_log_model(spark)
     finally:
-        spark.stop()
+        try:
+            spark.stop()
+        except Exception:
+            pass
         log("Spark session stopped.")
 
     write_seed_manifest()

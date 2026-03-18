@@ -507,7 +507,7 @@ Expected: `15 rows` (one per customer).
 
 ### Goal
 
-Use the bootstrap script to run PySpark feature engineering, train a PySpark MLlib churn model, log it to MLflow, and save the MLServer model bundle.
+Use the bootstrap script to run PySpark feature engineering, train a PySpark MLlib churn model, and log it to MLflow.
 
 ### What happens
 
@@ -517,8 +517,9 @@ The `post_dbt` step of `seed_demo.py`:
 3. Writes each as Parquet files to MinIO (`s3a://warehouse/feast/...`) using Spark's native writer
 4. Reads `churn_training_dataset` from Iceberg and trains a PySpark MLlib `RandomForestClassifier` pipeline
 5. Evaluates the model (accuracy + AUC) and logs params, metrics, and the Spark model to MLflow under the `retail-churn-demo` experiment
-6. Saves the MLflow Spark model to `mlserver/models/churn-model/mlflow_model/` for MLServer
-7. Generates a `scored_dataset.csv` for Evidently
+6. Generates a `scored_dataset.csv` for Evidently
+
+> **Note**: The bootstrap does **not** deploy the model to MLServer. MLServer starts empty — you deploy models to it manually after training. See the MLServer deployment instructions in [Section 11 of Lab 1](01_LAB_PRODUCTION.md#section-11--deploy-model-to-mlserver).
 
 ### Steps
 
@@ -539,8 +540,8 @@ Expected output:
 [bootstrap]   Train: ... rows, Test: ... rows
 [bootstrap] Training PySpark MLlib RandomForestClassifier pipeline...
 [bootstrap]   Accuracy: ..., AUC: ...
-[bootstrap]   MLflow Spark model saved to .../mlflow_model
 [bootstrap]   Scored dataset written for Evidently.
+[bootstrap]   Model logged to MLflow.
 [bootstrap] Spark session stopped.
 [bootstrap] Post-dbt bootstrap complete.
 ```
@@ -564,28 +565,13 @@ Expected output:
    - **Metrics**: `accuracy` and `auc` (values between 0 and 1)
    - **Tags**: `training_framework = PySpark MLlib`
 
-### How to verify — MLServer model
+### How to verify — MLflow model artifact
 
-1. Check that the model directory exists:
-   ```bash
-   ls -la mlserver/models/churn-model/
-   ```
-   You should see a `mlflow_model/` directory and `model-settings.json`.
+1. In the MLflow UI, click the `bootstrap-pyspark-random-forest` run.
+2. Click the **Artifacts** tab.
+3. You should see a `spark-model/` folder containing the logged PySpark pipeline model.
 
-2. If MLServer is running, test it:
-   ```bash
-   curl -s http://localhost:8085/v2/models/churn-model/infer \
-     -H 'Content-Type: application/json' \
-     -d '{
-       "inputs": [{
-         "name": "predict",
-         "shape": [1, 8],
-         "datatype": "FP64",
-         "data": [[28, 3, 164.98, 54.99, 10, 5, 0, 0.0]]
-       }]
-     }' | python3 -m json.tool
-   ```
-   You should see a JSON response with a prediction value (`0.0` = not churning, `1.0` = churning).
+> To deploy this model to MLServer, follow [Section 11 of Lab 1](01_LAB_PRODUCTION.md#section-11--deploy-model-to-mlserver).
 
 ---
 
@@ -801,7 +787,7 @@ The DAG file at `airflow/dags/retail_pipeline.py` should already exist. If not, 
 |---|---|---|
 | `verify_airbyte_sync` | Python Trino check | Confirms 8 raw tables exist (Airbyte must have synced) |
 | `dbt_run_and_test` | `dbt deps && dbt run && dbt test` | Staging + mart tables in `analytics` schema |
-| `publish_features_and_train` | `seed_demo.py --step post_dbt` | Feast parquet files (via PySpark), MLflow run, MLServer MLflow Spark model |
+| `publish_features_and_train` | `seed_demo.py --step post_dbt` | Feast parquet files (via PySpark), MLflow run with logged Spark model |
 | `refresh_docs_index` | checks for seed_manifest.json | Confirms artifacts were created |
 
 ### Common mistakes
@@ -883,7 +869,7 @@ You have now built the entire pipeline within the monorepo:
 3. ✅ Created 8 dbt staging models and 4 mart models
 4. ✅ Ran dbt and generated docs
 5. ✅ Used PySpark to publish features to MinIO and trained a PySpark MLlib model
-6. ✅ Logged PySpark MLlib model to MLflow, saved MLflow Spark model for MLServer
+6. ✅ Logged PySpark MLlib model to MLflow
 7. ✅ Defined and applied Feast features
 8. ✅ Ran Great Expectations and Evidently quality checks
 9. ✅ Verified the Airflow DAG with Airbyte sync verification

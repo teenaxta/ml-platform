@@ -40,6 +40,14 @@ spark = (
     .appName("Lab-ChurnModel-PySparkMLlib")
     .master(spark_master)
     .config("spark.jars.packages", PACKAGES)
+    .config("spark.driver.memory", "1g")
+    .config("spark.executor.memory", "1g")
+    .config("spark.executor.memoryOverhead", "512m")
+    .config("spark.sql.shuffle.partitions", "4")
+    .config("spark.default.parallelism", "2")
+    .config("spark.sql.adaptive.enabled", "true")
+    .config("spark.network.timeout", "300s")
+    .config("spark.executor.heartbeatInterval", "60s")
     .config("spark.sql.extensions",
             "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions")
     .config("spark.sql.catalog.warehouse", "org.apache.iceberg.spark.SparkCatalog")
@@ -106,7 +114,8 @@ assembler = VectorAssembler(inputCols=FEATURE_COLUMNS, outputCol="features")
 rf = RandomForestClassifier(
     featuresCol="features",
     labelCol="churn_label",
-    numTrees=50,
+    numTrees=20,
+    maxDepth=5,
     seed=42,
 )
 pipeline = Pipeline(stages=[assembler, rf])

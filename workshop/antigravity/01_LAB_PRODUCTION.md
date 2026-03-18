@@ -1270,29 +1270,80 @@ print("Spark session stopped.")
 
 ### Goal
 
-Copy the trained MLflow Spark model to the MLServer models directory and verify it serves predictions via REST API.
+Deploy the trained MLflow Spark model to MLServer and verify it serves predictions via REST API.
+
+### How MLServer works
+
+MLServer starts with an **empty models directory** (`mlserver/models/`). To serve a model you add two things into a subfolder:
+
+1. **The model artifact** — the saved MLflow model directory (e.g. `mlflow_model/`)
+2. **A `model-settings.json`** — tells MLServer which runtime to use, the model name, and where the artifact lives
+
+MLServer watches `mlserver/models/` — each subfolder with a valid `model-settings.json` becomes a served model. You can add, update, or remove models by managing these folders and restarting.
 
 ### Steps
 
-1. Copy the model files from the notebook workspace to the MLServer volume:
+**Step 11.1 — Create the model directory on the host**
 
 ```bash
-# Copy the MLflow model directory
+mkdir -p mlserver/models/churn-model
+```
+
+**Step 11.2 — Copy the saved model from JupyterHub**
+
+In Section 10 you saved the MLflow Spark model to `/srv/jupyterhub/notebooks/churn-model/`. Copy both the model artifact and the settings file to the MLServer volume:
+
+```bash
 docker compose cp jupyterhub:/srv/jupyterhub/notebooks/churn-model/mlflow_model \
   ./mlserver/models/churn-model/mlflow_model
 
-# Copy model-settings.json
 docker compose cp jupyterhub:/srv/jupyterhub/notebooks/churn-model/model-settings.json \
   ./mlserver/models/churn-model/model-settings.json
 ```
 
-2. Restart MLServer to pick up the new model:
+Your `mlserver/models/churn-model/` directory should now look like:
+
+```
+mlserver/models/churn-model/
+├── model-settings.json
+└── mlflow_model/
+    ├── MLmodel
+    ├── conda.yaml
+    ├── python_env.yaml
+    ├── requirements.txt
+    └── sparkml/
+        └── ... (Spark pipeline stages)
+```
+
+**Step 11.3 — Verify `model-settings.json`**
+
+The file should contain:
+
+```json
+{
+  "name": "churn-model",
+  "implementation": "mlserver_mlflow.MLflowRuntime",
+  "parameters": {
+    "uri": "./mlflow_model",
+    "version": "v1"
+  }
+}
+```
+
+Key fields:
+- **`name`** — the model name used in API URLs (`/v2/models/churn-model/...`)
+- **`implementation`** — `mlserver_mlflow.MLflowRuntime` lets MLServer load any MLflow-saved model
+- **`parameters.uri`** — relative path from the model folder to the MLflow artifact directory
+
+**Step 11.4 — Restart MLServer to load the model**
 
 ```bash
 docker compose restart mlserver
 ```
 
-3. Wait about 15–20 seconds (the MLflow runtime takes slightly longer to initialize than sklearn), then verify:
+**Step 11.5 — Verify the model is loaded**
+
+Wait about 15–20 seconds (the Spark runtime takes slightly longer to initialize), then check:
 
 ```bash
 curl -s http://localhost:8085/v2/models/churn-model | python3 -m json.tool
@@ -1310,7 +1361,7 @@ Expected output:
 }
 ```
 
-4. Test a prediction. The MLflow Spark runtime accepts a `dataframe_split` input format:
+**Step 11.6 — Test a prediction**
 
 ```bash
 curl -s http://localhost:8085/v2/models/churn-model/infer \
@@ -1325,13 +1376,35 @@ curl -s http://localhost:8085/v2/models/churn-model/infer \
   }' | python3 -m json.tool
 ```
 
-5. You should get a JSON response with `"outputs"` containing a prediction (`0.0` = not churning, `1.0` = churning).
+The 8 values correspond to the feature columns in order: `age`, `total_orders`, `lifetime_value`, `avg_order_value`, `days_since_last_order`, `page_views_30d`, `support_tickets`, `return_rate`.
+
+You should get a JSON response with `"outputs"` containing a prediction (`0.0` = not churning, `1.0` = churning).
+
+### How to add a different model later
+
+You can serve any MLflow-compatible model (sklearn, XGBoost, PyTorch, etc.) by repeating this pattern:
+
+1. Save the model with `mlflow.<flavor>.save_model()` in a notebook
+2. Create a new subfolder under `mlserver/models/` (e.g. `mlserver/models/my-new-model/`)
+3. Copy the saved model artifact into it
+4. Write a `model-settings.json` pointing to the artifact (adjust `implementation` if not using MLflow — see [MLServer docs](https://mlserver.readthedocs.io/en/latest/runtimes/index.html))
+5. Restart MLServer: `docker compose restart mlserver`
+
+### Removing a model
+
+Delete the model subfolder and restart:
+
+```bash
+rm -rf mlserver/models/churn-model
+docker compose restart mlserver
+```
 
 ### What broken looks like
 
-- If curl returns "Connection refused", MLServer is not running. Check `docker compose ps mlserver`.
-- If the model endpoint returns 404, the `mlflow_model/` directory or `model-settings.json` is missing. List: `ls -la mlserver/models/churn-model/`.
-- If it returns a 500 error, check MLServer logs: `docker compose logs mlserver --tail=50`. Missing Java or PySpark in the MLServer container is the most common cause.
+- **"Connection refused"** from curl — MLServer is not running. Check `docker compose ps mlserver`.
+- **404 on the model endpoint** — the `mlflow_model/` directory or `model-settings.json` is missing. List: `ls -la mlserver/models/churn-model/`.
+- **500 error** — check MLServer logs: `docker compose logs mlserver --tail=50`. Common causes: missing Java/PySpark in the container, or corrupt model files.
+- **`ValueError: RDD is empty`** — the Spark model artifact is incomplete or was saved from a crashed session. Retrain and re-save the model in JupyterHub.
 
 ---
 
@@ -1497,7 +1570,7 @@ with DAG(
 |---|---|---|
 | `verify_airbyte_sync` | Python Trino check | Confirms 8 raw tables exist (Airbyte must have synced) |
 | `dbt_run_and_test` | `dbt deps && dbt run && dbt test` | Staging + mart tables in `analytics` schema |
-| `publish_features_and_train` | `seed_demo.py --step post_dbt` | Feast parquet files (via PySpark), MLflow run, MLServer model |
+| `publish_features_and_train` | `seed_demo.py --step post_dbt` | Feast parquet files (via PySpark), MLflow run with logged Spark model |
 | `refresh_docs_index` | checks for seed_manifest.json | Confirms artifacts were created |
 
 ### What failure looks like

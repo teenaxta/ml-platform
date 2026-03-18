@@ -1,8 +1,0 @@
-{
-  "name": "churn-model",
-  "implementation": "mlserver_mlflow.MLflowRuntime",
-  "parameters": {
-    "uri": "./mlflow_model",
-    "version": "v1"
-  }
-}

@@ -167,7 +167,7 @@ services:
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
       AWS_REGION: us-east-1
       AWS_DEFAULT_REGION: us-east-1
-      SPARK_WORKER_MEMORY: ${SPARK_WORKER_MEMORY:-8G}
+      SPARK_WORKER_MEMORY: ${SPARK_WORKER_MEMORY:-2G}
       SPARK_WORKER_CORES: ${SPARK_WORKER_CORES:-4}
       SPARK_RPC_AUTHENTICATION_ENABLED: "no"
       SPARK_RPC_ENCRYPTION_ENABLED: "no"
@@ -531,6 +531,7 @@ services:
       dockerfile: Dockerfile
     platform: linux/amd64
     container_name: dbt-bootstrap
+    profiles: ["bootstrap"]
     depends_on:
       trino:
         condition: service_healthy
@@ -553,6 +554,7 @@ services:
       dockerfile: Dockerfile
     platform: linux/amd64
     container_name: platform-bootstrap
+    profiles: ["bootstrap"]
     depends_on:
       dbt-bootstrap:
         condition: service_completed_successfully
@@ -573,6 +575,7 @@ services:
       ICEBERG_JDBC_PASSWORD: iceberg123
       MLFLOW_S3_ENDPOINT_URL: http://minio:9000
       MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_REGISTRY_URI: http://mlflow:5000
       MLFLOW_TRACKING_USERNAME: ${MLFLOW_ADMIN_USERNAME:-admin}
       MLFLOW_TRACKING_PASSWORD: ${MLFLOW_ADMIN_PASSWORD:-MLflowAdmin777}
       SPARK_MASTER_URL: spark://spark-master:7077
@@ -590,6 +593,7 @@ services:
       dockerfile: Dockerfile
     platform: linux/amd64
     container_name: feast-bootstrap
+    profiles: ["bootstrap"]
     depends_on:
       platform-bootstrap:
         condition: service_completed_successfully
@@ -622,6 +626,7 @@ services:
       dockerfile: Dockerfile
     platform: linux/amd64
     container_name: quality-bootstrap
+    profiles: ["bootstrap"]
     depends_on:
       platform-bootstrap:
         condition: service_completed_successfully
@@ -639,9 +644,6 @@ services:
       dockerfile: Dockerfile
     platform: linux/amd64
     container_name: mlserver
-    depends_on:
-      platform-bootstrap:
-        condition: service_completed_successfully
     ports:
       - "8085:8080"
       - "8086:8081"

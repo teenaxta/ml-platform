@@ -1,7 +1,7 @@
 {
-  "generated_at": "2026-03-15T19:29:08.562829+00:00",
+  "generated_at": "2026-03-17T19:10:18.213102+00:00",
   "dbt_docs": "dbt/retail/target/index.html",
   "great_expectations_docs": "great_expectations/uncommitted/data_docs/local_site/index.html",
   "evidently_report": "evidently/reports/index.html",
-  "mlserver_model": "mlserver/models/churn-model/model.joblib"
+  "mlserver_model": "mlserver/models/churn-model/mlflow_model"
 }

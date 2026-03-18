@@ -52,6 +52,9 @@ airflow/airflow-webserver.pid
 mlflow/artifacts/
 mlflow/mlruns/
 
+# MLServer — model artifacts are deployed at runtime, not committed
+mlserver/models/*/
+
 # Docker
 .docker/
 
